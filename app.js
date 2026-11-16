@@ -1742,7 +1742,7 @@
     const showNotes = !self && isOfficer();
     const [members, past, upcoming, changes, allNotes, mlog] = await Promise.all([
       api.members(), api.history(since), api.events(false), api.profileHistory(), showNotes ? api.notes() : Promise.resolve([]),
-      api.membershipLog(targetId),
+      api.membershipLog(targetId).catch(() => []), // se o banco ainda não tiver o histórico, mostra vazio
     ]);
     state.members = members;
     const me = members.find((m) => m.id === targetId) || (self ? state.me : null);
