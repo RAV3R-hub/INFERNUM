@@ -5,8 +5,8 @@ window.CLAN_CONFIG = {
   tagline: "Forjados no fogo. Unidos na batalha.",
 
   // Supabase → Project Settings → API → "Project URL"   (ex.: "https://abcdefgh.supabase.co")
-  supabaseUrl: "",
+  supabaseUrl: "https://xvqxggkmrurvcbaxyifh.supabase.co",
 
-  // Supabase → Project Settings → API Keys → chave "anon" / "publishable" (é pública, pode ficar aqui)
-  supabaseAnonKey: "",
+  // Supabase → Project Settings → API Keys → Legacy API Keys → chave "anon" (é pública, pode ficar aqui)
+  supabaseAnonKey: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Inh2cXhnZ2ttcnVydmNiYXh5aWZoIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTQ4NTk5MTEsImV4cCI6MjExMDQzNTkxMX0.BcXvqavfY-x5mTB4ETHccVnv41PqC500axBBOO6E99E",
 };
