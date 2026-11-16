@@ -76,7 +76,8 @@ Mande o link no Discord do clã. Cada pessoa entra com o Discord e aparece em **
 | Criar / editar / apagar eventos | | ✔ | ✔ |
 | Montar times | | ✔ | ✔ |
 | Registrar presença real e ver a frequência | | ✔ | ✔ |
-| Aprovar ou remover membros comuns | | ✔ | ✔ |
+| Aprovar, recusar ou remover membros comuns | | ✔ | ✔ |
+| Remover oficiais e readmitir ex-membros | | | ✔ |
 | Promover a oficial ou líder | | | ✔ |
 
 As regras ficam no próprio banco (Row Level Security), então ninguém consegue burlar alterando o site.

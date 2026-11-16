@@ -171,6 +171,31 @@ create table if not exists public.member_notes (
 );
 create index if not exists member_notes_member_idx on public.member_notes (member_id, created_at desc);
 
+-- ---------- Ex-membros e histórico no clã -----------------------------
+-- role 'former' = ex-membro: sai das listas, perde o acesso, mas o histórico é mantido.
+-- Se a pessoa entrar de novo no site, pode pedir para voltar (vira 'pending').
+alter table public.profiles drop constraint if exists profiles_role_check;
+alter table public.profiles add constraint profiles_role_check
+  check (role in ('pending', 'member', 'officer', 'leader', 'former'));
+
+-- Toda mudança de cargo fica registrada (entrou, aprovado, promovido, removido, voltou...)
+create table if not exists public.membership_log (
+  id         bigint generated always as identity primary key,
+  user_id    uuid not null references public.profiles(id) on delete cascade,
+  from_role  text,
+  to_role    text not null,
+  changed_by uuid references public.profiles(id) on delete set null,
+  reason     text check (reason is null or char_length(reason) <= 300),
+  changed_at timestamptz not null default now()
+);
+create index if not exists membership_log_user_idx on public.membership_log (user_id, changed_at desc);
+
+-- Quem já estava cadastrado antes do histórico existir ganha um registro inicial
+insert into public.membership_log (user_id, from_role, to_role, reason, changed_at)
+select p.id, null, p.role, 'Registro inicial (antes do histórico do clã)', p.created_at
+  from public.profiles p
+ where not exists (select 1 from public.membership_log m where m.user_id = p.id);
+
 -- ---------- Funções auxiliares ----------------------------------------
 
 create or replace function public.my_role() returns text
@@ -244,6 +269,72 @@ end $$;
 
 revoke execute on function public.set_member_role(uuid, text) from public, anon;
 grant  execute on function public.set_member_role(uuid, text) to authenticated;
+
+-- Remover do clã (ou recusar quem está aguardando aprovação).
+--   Líder:   qualquer pessoa (menos ele mesmo).
+--   Oficial: só quem está aguardando aprovação ou é membro comum.
+-- Mantém presenças passadas, histórico e anotações; apaga respostas/vagas de eventos futuros e o telefone.
+create or replace function public.remove_member(target uuid, reason text) returns void
+language plpgsql security definer set search_path = public as $$
+declare
+  me  text := public.my_role();
+  cur text;
+begin
+  if target = auth.uid() then
+    raise exception 'Você não pode remover a si mesmo';
+  end if;
+  select role into cur from public.profiles where id = target;
+  if cur is null then
+    raise exception 'Membro não encontrado';
+  end if;
+  if cur = 'former' then
+    raise exception 'Esta pessoa já é ex-membro';
+  end if;
+  if not (me = 'leader' or (me = 'officer' and cur in ('pending', 'member'))) then
+    raise exception 'Sem permissão para remover esta pessoa';
+  end if;
+  perform set_config('infernum.reason', left(coalesce(nullif(trim(reason), ''), ''), 300), true);
+  update public.profiles set role = 'former' where id = target;
+  delete from public.rsvps r
+   using public.events e
+   where r.event_id = e.id and r.user_id = target and e.starts_at > now();
+  delete from public.member_contacts where user_id = target;
+end $$;
+
+-- Ex-membro pede para voltar (aparece de novo em "Aguardando aprovação")
+create or replace function public.request_rejoin() returns void
+language plpgsql security definer set search_path = public as $$
+begin
+  if public.my_role() is distinct from 'former' then
+    raise exception 'Você não é ex-membro';
+  end if;
+  perform set_config('infernum.reason', 'Pediu para voltar ao clã', true);
+  update public.profiles set role = 'pending' where id = auth.uid();
+end $$;
+
+revoke execute on function public.remove_member(uuid, text) from public, anon;
+revoke execute on function public.request_rejoin()           from public, anon;
+grant  execute on function public.remove_member(uuid, text) to authenticated;
+grant  execute on function public.request_rejoin()           to authenticated;
+
+-- Registra toda mudança de cargo no histórico do clã
+create or replace function public.log_role_change() returns trigger
+language plpgsql security definer set search_path = public as $$
+begin
+  if tg_op = 'INSERT' then
+    insert into public.membership_log (user_id, from_role, to_role, changed_by, reason)
+    values (new.id, null, new.role, null, 'Primeiro acesso ao site');
+  elsif old.role is distinct from new.role then
+    insert into public.membership_log (user_id, from_role, to_role, changed_by, reason)
+    values (new.id, old.role, new.role, auth.uid(), nullif(current_setting('infernum.reason', true), ''));
+  end if;
+  return new;
+end $$;
+
+drop trigger if exists profiles_log_role on public.profiles;
+create trigger profiles_log_role
+  after insert or update of role on public.profiles
+  for each row execute function public.log_role_change();
 
 -- Registra no histórico qualquer mudança de nome, classe ou atributos
 create or replace function public.log_profile_change() returns trigger
@@ -426,6 +517,12 @@ alter table public.attendance enable row level security;
 alter table public.profile_history enable row level security;
 alter table public.event_types enable row level security;
 alter table public.member_notes enable row level security;
+alter table public.membership_log enable row level security;
+
+-- Histórico no clã: oficiais e líder veem de todos; cada pessoa vê o próprio. Só o banco escreve.
+drop policy if exists "membership_log_select" on public.membership_log;
+create policy "membership_log_select" on public.membership_log
+  for select to authenticated using (user_id = auth.uid() or public.is_officer());
 
 -- Anotações internas: só oficiais e líder. Ninguém vê (nem escreve) anotações sobre si mesmo.
 -- Cada um apaga as próprias; o líder pode apagar qualquer uma.

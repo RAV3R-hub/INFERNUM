@@ -475,6 +475,20 @@ h1 { background: linear-gradient(180deg, #fff1da, #e3b878); -webkit-background-c
 .note-badge { font-size: .72rem; color: var(--gold); border: 1px solid rgba(220, 170, 82, .4); border-radius: 999px; padding: 0 6px; margin-left: 4px; }
 @media (max-width: 640px) { .note-form { flex-direction: column; align-items: stretch; } }
 
+/* Ex-membros e histórico no clã */
+.former-box { margin-top: 16px; }
+.former-box summary { cursor: pointer; font-family: "Cinzel", serif; color: var(--muted); font-weight: 700; padding: 6px 2px; list-style: none; }
+.former-box summary::-webkit-details-marker { display: none; }
+.former-box summary::before { content: "▸ "; color: var(--gold); }
+.former-box[open] summary::before { content: "▾ "; }
+.former-box .card { margin-top: 8px; opacity: .85; }
+.left-info { text-align: right; max-width: 260px; line-height: 1.35; }
+.former-badge { background: #3a2a2a; color: #d9b3ac; border: 1px solid #6b3b35; font-family: "Inter", sans-serif; vertical-align: middle; }
+.member-log { margin-top: 12px; }
+.member-log h2 { font-size: 1.05rem; }
+.hist-item.out { border-left-color: var(--no); }
+.hist-item.out::before { background: var(--no); box-shadow: 0 0 6px var(--no); }
+
 /* Time único (visão do membro) */
 .teams-grid.single { grid-template-columns: minmax(0, 380px); }
 

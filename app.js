@@ -2,10 +2,12 @@
   'use strict';
 
   const CFG = window.CLAN_CONFIG || {};
-  const DEMO = !CFG.supabaseUrl || !CFG.supabaseAnonKey;
+  // "?demo" no endereço força o modo demonstração (dados fictícios), útil para testar sem mexer no banco real
+  const DEMO = new URLSearchParams(location.search).has('demo') || !CFG.supabaseUrl || !CFG.supabaseAnonKey;
 
-  const ROLE_LABEL = { pending: 'Aguardando aprovação', member: 'Membro', officer: 'Oficial', leader: 'Líder' };
-  const ROLE_ORDER = { leader: 0, officer: 1, member: 2, pending: 3 };
+  const ROLE_LABEL = { pending: 'Aguardando aprovação', member: 'Membro', officer: 'Oficial', leader: 'Líder', former: 'Ex-membro' };
+  const ROLE_ORDER = { leader: 0, officer: 1, member: 2, pending: 3, former: 4 };
+  const ACTIVE_ROLES = ['member', 'officer', 'leader'];
 
   const CLASSES = [
     { key: 'dh', label: 'DH', short: 'DH', color: '#7cb342' },
@@ -121,6 +123,13 @@
       },
       async clearRsvp(eventId) { ok(await sb.from('rsvps').delete().eq('event_id', eventId).eq('user_id', state.user.id)); },
       async setRole(userId, role) { ok(await sb.rpc('set_member_role', { target: userId, new_role: role })); },
+      async removeMember(userId, reason) { ok(await sb.rpc('remove_member', { target: userId, reason: reason || '' })); },
+      async requestRejoin() { ok(await sb.rpc('request_rejoin')); },
+      async membershipLog(userId) {
+        let q = sb.from('membership_log').select('*').order('changed_at', { ascending: false });
+        if (userId) q = q.eq('user_id', userId);
+        return ok(await q);
+      },
       async assign(eventId, userId, team) { ok(await sb.from('team_slots').upsert({ event_id: eventId, user_id: userId, team })); },
       async unassign(eventId, userId) { ok(await sb.from('team_slots').delete().eq('event_id', eventId).eq('user_id', userId)); },
       async removeTeams(eventId, teams) {
@@ -159,6 +168,7 @@
           created_at: i === NICKS.length - 1 ? day(-4, 12) : longAgo, ...randomBuild(),
         })),
         { id: 'p1', discord_name: 'novato123', game_name: null, role: 'pending', created_at: day(-1, 12) },
+        { id: 'f1', discord_name: 'desertor_br', game_name: 'Desertor', role: 'former', created_at: longAgo, ...randomBuild() },
       ],
       contacts: [{ user_id: 'u1', phone: '(11) 98765-4321' }, { user_id: 'u3', phone: '(21) 99876-5432' }],
       events: [
@@ -188,6 +198,18 @@
       { id: 900, member_id: 'u5', author_id: 'u1', body: 'Avisou que troca de turno no trabalho às quintas; pode chegar atrasado na Guerra.', created_at: day(-3, 22) },
       { id: 901, member_id: 'u2', author_id: 'u0', body: 'Ótimo shotcaller. Considerar para liderar uma sala de Exaltação.', created_at: day(-10, 21) },
     ];
+    // Histórico no clã (entradas, aprovações, promoções e saídas)
+    db.mlog = [];
+    const addLog = (user_id, from_role, to_role, at, changed_by = null, reason = null) =>
+      db.mlog.push({ id: db.mlog.length + 1, user_id, from_role, to_role, changed_by, reason, changed_at: at });
+    db.profiles.forEach((p) => {
+      const t0 = Date.parse(p.created_at);
+      addLog(p.id, null, 'pending', new Date(t0).toISOString(), null, 'Primeiro acesso ao site');
+      if (p.role !== 'pending') addLog(p.id, 'pending', 'member', new Date(t0 + 3600e3).toISOString(), p.id === 'u0' ? null : 'u0');
+    });
+    addLog('u0', 'member', 'leader', new Date(Date.parse(longAgo) + 7200e3).toISOString(), null, null);
+    addLog('u1', 'member', 'officer', day(-90, 20), 'u0');
+    addLog('f1', 'member', 'former', day(-20, 21), 'u0', 'Inativo há 2 meses');
     db.profiles.slice(1, 31).forEach((p, i) => answer(1, p.id, i % 7 !== 3));
     db.profiles.slice(5, 26).forEach((p, i) => answer(3, p.id, i % 5 !== 0));
     db.profiles.slice(2, 6).forEach((p, i) => answer(2, p.id, i !== 1));
@@ -324,7 +346,32 @@
       },
       async setRole(userId, role) {
         if (userId === state.user.id) throw new Error('Você não pode alterar o próprio cargo');
-        profile(userId).role = role;
+        const p = profile(userId);
+        db.mlog.push({ id: db.mlog.length + 1, user_id: userId, from_role: p.role, to_role: role, changed_by: state.user.id, reason: null, changed_at: new Date().toISOString() });
+        p.role = role;
+      },
+      async removeMember(userId, reason) {
+        const p = profile(userId);
+        const me = profile(state.user.id).role;
+        if (userId === state.user.id) throw new Error('Você não pode remover a si mesmo');
+        if (p.role === 'former') throw new Error('Esta pessoa já é ex-membro');
+        if (!(me === 'leader' || (me === 'officer' && ['pending', 'member'].includes(p.role)))) throw new Error('Sem permissão para remover esta pessoa');
+        db.mlog.push({ id: db.mlog.length + 1, user_id: userId, from_role: p.role, to_role: 'former', changed_by: state.user.id, reason: reason || null, changed_at: new Date().toISOString() });
+        p.role = 'former';
+        const future = new Set(db.events.filter((e) => Date.parse(e.starts_at) > Date.now()).map((e) => e.id));
+        db.rsvps = db.rsvps.filter((r) => !(r.user_id === userId && future.has(r.event_id)));
+        db.slots = db.slots.filter((s) => !(s.user_id === userId && future.has(s.event_id)));
+        db.contacts = db.contacts.filter((c) => c.user_id !== userId);
+      },
+      async requestRejoin() {
+        const p = profile(state.user.id);
+        if (p.role !== 'former') throw new Error('Você não é ex-membro');
+        db.mlog.push({ id: db.mlog.length + 1, user_id: p.id, from_role: 'former', to_role: 'pending', changed_by: p.id, reason: 'Pediu para voltar ao clã', changed_at: new Date().toISOString() });
+        p.role = 'pending';
+      },
+      async membershipLog(userId) {
+        return db.mlog.filter((h) => (!userId || h.user_id === userId) && (isOfficer() || h.user_id === state.user.id))
+          .sort((a, b) => Date.parse(b.changed_at) - Date.parse(a.changed_at)).map((h) => ({ ...h }));
       },
       async assign(eventId, userId, team) {
         if (!db.rsvps.some((r) => r.event_id === eventId && r.user_id === userId && r.going)) throw new Error('Este membro não confirmou presença no evento');
@@ -360,7 +407,7 @@
 
   const isMember = () => ['member', 'officer', 'leader'].includes(state.me?.role);
   const isOfficer = () => ['officer', 'leader'].includes(state.me?.role);
-  const activeMembers = () => state.members.filter((m) => m.role !== 'pending');
+  const activeMembers = () => state.members.filter((m) => ACTIVE_ROLES.includes(m.role));
   const displayName = (p) => p?.game_name || p?.discord_name || 'Desconhecido';
   const hasBuild = (b) => !!b?.char_class && ATTRS.every((a) => Number.isFinite(b[a.key]));
   const fmtNum = (n) => (Number.isFinite(n) ? n.toLocaleString('pt-BR') : '—');
@@ -483,7 +530,7 @@
     if (DEMO) {
       banner.innerHTML = `Modo demonstração: dados fictícios, nada é salvo.${state.me ? `
         <label class="demo-role">Ver como
-          <select id="demo-role" class="inline">${['leader', 'officer', 'member'].map((r) => `<option value="${r}" ${state.me.role === r ? 'selected' : ''}>${ROLE_LABEL[r]}</option>`).join('')}</select>
+          <select id="demo-role" class="inline">${['leader', 'officer', 'member', 'former'].map((r) => `<option value="${r}" ${state.me.role === r ? 'selected' : ''}>${ROLE_LABEL[r]}</option>`).join('')}</select>
         </label>` : ''}`;
       $('#demo-role')?.addEventListener('change', async (e) => {
         await api.demoSetRole(e.target.value);
@@ -541,6 +588,82 @@
     </div>`;
     $('#btn-pf').addEventListener('click', openProfile);
     $('#btn-recheck').addEventListener('click', () => boot());
+  }
+
+  // Quem foi removido do clã: pode pedir para voltar
+  function viewFormer() {
+    main.innerHTML = `<div class="hero">
+      <span class="sigil">🚪</span>
+      <h1>Você não faz mais parte do clã</h1>
+      <p>Olá, <strong>${esc(displayName(state.me))}</strong>. Seu acesso ao ${esc(CFG.clanName || 'clã')} foi encerrado.
+        Se quiser voltar, envie um pedido: ele aparece para os oficiais em “Aguardando aprovação”.</p>
+      <div class="row" style="justify-content:center">
+        <button class="btn primary" id="btn-rejoin">Pedir para voltar</button>
+        <button class="btn ghost" id="btn-out">Sair</button>
+      </div>
+    </div>`;
+    $('#btn-rejoin').addEventListener('click', async (e) => {
+      e.target.disabled = true;
+      try { await api.requestRejoin(); toast('Pedido enviado! Aguarde a aprovação de um oficial.'); await boot(); } catch (err) { fail(err); e.target.disabled = false; }
+    });
+    $('#btn-out').addEventListener('click', () => api.signOut().catch(fail));
+  }
+
+  // Descrição de uma mudança de cargo no histórico do clã
+  function roleChangeLabel(h) {
+    const f = h.from_role; const t = h.to_role;
+    if (!f) return t === 'pending' ? 'Entrou no site (aguardando aprovação)' : `Registro inicial: ${ROLE_LABEL[t] || t}`;
+    if (t === 'former') return f === 'pending' ? 'Pedido de entrada recusado' : 'Removido do clã';
+    if (f === 'former' && t === 'pending') return 'Pediu para voltar ao clã';
+    if (f === 'former') return `Readmitido como ${ROLE_LABEL[t] || t}`;
+    if (f === 'pending' && t === 'member') return 'Aprovado no clã';
+    const rank = { member: 1, officer: 2, leader: 3 };
+    if (rank[f] && rank[t]) return rank[t] > rank[f] ? `Promovido a ${ROLE_LABEL[t]}` : `Passou a ${ROLE_LABEL[t]}`;
+    return `Cargo: ${ROLE_LABEL[f] || f} → ${ROLE_LABEL[t] || t}`;
+  }
+
+  function membershipCard(entries, members) {
+    const byId = Object.fromEntries(members.map((m) => [m.id, m]));
+    const auto = /^(Primeiro acesso|Registro inicial)/;
+    const items = entries.map((h) => `<div class="hist-item${h.to_role === 'former' ? ' out' : ''}">
+        <div class="hist-date">${new Date(h.changed_at).toLocaleDateString('pt-BR')} · ${fmtTime(h.changed_at)}</div>
+        <div>${esc(roleChangeLabel(h))}${h.changed_by && byId[h.changed_by] && h.changed_by !== h.user_id ? ` <span class="muted small">por ${esc(displayName(byId[h.changed_by]))}</span>` : ''}</div>
+        ${h.reason && !auto.test(h.reason) ? `<div class="muted small">“${esc(h.reason)}”</div>` : ''}
+      </div>`).join('');
+    return `<div class="card member-log"><h2>🛡 Histórico no clã</h2><div class="hist">${items || '<p class="muted">Nenhum registro.</p>'}</div></div>`;
+  }
+
+  // Remover do clã (ou recusar quem está aguardando aprovação)
+  function openRemoveDialog(m, after) {
+    const reject = m.role === 'pending';
+    const name = esc(displayName(m));
+    openDialog(`
+      <form id="rm-form" class="stack">
+        <h2>${reject ? 'Recusar entrada' : 'Remover do clã'}</h2>
+        <p class="small" style="margin:0">${reject ? `<b>${name}</b> sai da lista de aprovação` : `<b>${name}</b> perde o acesso ao site e vai para a lista de <b>Ex-membros</b>`}.
+          O histórico (presenças, alterações e anotações) é mantido. Se a pessoa entrar de novo no site, poderá pedir para voltar.</p>
+        ${reject ? '' : '<p class="muted small" style="margin:0">As respostas e vagas em times de eventos futuros são apagadas, e o telefone é descartado.</p>'}
+        <div class="field">
+          <label for="rm-reason">Motivo <span class="muted small">(opcional, fica no histórico)</span></label>
+          <textarea id="rm-reason" maxlength="300" placeholder="Ex.: conta de teste, inativo há 2 meses…"></textarea>
+        </div>
+        <div class="row end">
+          <button type="button" class="btn ghost" data-close>Cancelar</button>
+          <button type="submit" class="btn primary">${reject ? 'Recusar' : 'Remover do clã'}</button>
+        </div>
+      </form>`, (d) => {
+      $('#rm-form', d).addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const submit = $('button[type=submit]', d);
+        submit.disabled = true;
+        try {
+          await api.removeMember(m.id, $('#rm-reason', d).value.trim());
+          dlg.close();
+          toast(reject ? 'Pedido recusado' : `${displayName(m)} foi removido do clã`);
+          await after();
+        } catch (err) { fail(err); submit.disabled = false; }
+      });
+    });
   }
 
   function counts(ev) {
@@ -1583,7 +1706,7 @@
     const freq = Object.fromEntries(computeFrequency(events, activeMembers()).map((r) => [r.m.id, r]));
     const header = ['Personagem', 'Discord', 'Cargo', 'Classe', ...ATTRS.map((a) => a.label), 'Telefone',
       `Frequência ${days} dias`, 'Presenças', 'Eventos contados', 'Confirmou e faltou', 'Sem resposta', 'Membro desde'];
-    const rows = [...state.members]
+    const rows = state.members.filter((m) => m.role !== 'former')
       .sort((a, b) => (ROLE_ORDER[a.role] - ROLE_ORDER[b.role]) || byName(a, b))
       .map((m) => {
         const f = freq[m.id];
@@ -1617,8 +1740,9 @@
     loading();
     const since = P.days ? new Date(Date.now() - P.days * 86400000).toISOString() : null;
     const showNotes = !self && isOfficer();
-    const [members, past, upcoming, changes, allNotes] = await Promise.all([
+    const [members, past, upcoming, changes, allNotes, mlog] = await Promise.all([
       api.members(), api.history(since), api.events(false), api.profileHistory(), showNotes ? api.notes() : Promise.resolve([]),
+      api.membershipLog(targetId),
     ]);
     state.members = members;
     const me = members.find((m) => m.id === targetId) || (self ? state.me : null);
@@ -1693,7 +1817,7 @@
         <div class="row">
           ${avatar(me, 'xl')}
           <div class="spacer">
-            <div class="me-name">${esc(displayName(me))}</div>
+            <div class="me-name">${esc(displayName(me))}${me.role === 'former' ? ' <span class="badge former-badge">Ex-membro</span>' : ''}</div>
             <div class="muted small">${me.game_name ? `${esc(me.discord_name)} · ` : ''}${ROLE_LABEL[me.role]}${me.created_at ? ` · no clã desde ${new Date(me.created_at).toLocaleDateString('pt-BR')}` : ''}${phone ? ` · <a href="tel:${esc(phone.replace(/[^\d+]/g, ''))}">📞 ${esc(phone)}</a>` : ''}</div>
             ${me.char_class ? `<div class="member-build">${classTag(me.char_class)} <span>${esc(CLASS[me.char_class].label)}</span><span class="chip-stats">${statsLine(me)}</span></div>` : ''}
           </div>
@@ -1727,6 +1851,7 @@
           <div class="hist">${histItemsHtml(myChanges) || '<p class="muted">Nenhuma alteração registrada ainda.</p>'}</div>
         </div>
       </div>
+      ${membershipCard(mlog.filter((h) => h.user_id === me.id), members)}
       ${showNotes ? notesCard(me, allNotes.filter((n) => n.member_id === me.id), members) : ''}`;
 
     $('#btn-edit-pf')?.addEventListener('click', openProfile);
@@ -1784,17 +1909,28 @@
     const oldNames = (id) => (histBy[id] || []).flatMap((h) => ['game_name', 'discord_name'].map((f) => h.changes?.[f]?.[0])).filter(Boolean);
     const sorted = [...state.members].sort((a, b) => (ROLE_ORDER[a.role] - ROLE_ORDER[b.role]) || byName(a, b));
     const pending = sorted.filter((m) => m.role === 'pending');
-    const active = sorted.filter((m) => m.role !== 'pending');
+    const active = sorted.filter((m) => ACTIVE_ROLES.includes(m.role));
+    const former = sorted.filter((m) => m.role === 'former');
     const amLeader = state.me.role === 'leader';
+    // Quando e por que cada ex-membro saiu
+    const mlog = isOfficer() && former.length ? await api.membershipLog() : [];
+    const byIdAll = Object.fromEntries(state.members.map((m) => [m.id, m]));
+    const leftInfo = (m) => {
+      const h = mlog.find((x) => x.user_id === m.id && x.to_role === 'former');
+      if (!h) return '<span class="muted small">Ex-membro</span>';
+      return `<span class="muted small left-info">${h.from_role === 'pending' ? 'Recusado' : 'Removido'} em ${new Date(h.changed_at).toLocaleDateString('pt-BR')}`
+        + `${byIdAll[h.changed_by] ? ` por ${esc(displayName(byIdAll[h.changed_by]))}` : ''}${h.reason ? `<br>“${esc(h.reason)}”` : ''}</span>`;
+    };
 
     const roleControl = (m) => {
       if (m.id === state.user.id) return `<span class="role-tag ${m.role}">${ROLE_LABEL[m.role]} (você)</span>`;
       if (amLeader) {
         return `<select class="inline" data-role="${esc(m.id)}" aria-label="Cargo de ${esc(displayName(m))}">
-          ${['member', 'officer', 'leader', 'pending'].map((r) => `<option value="${r}" ${r === m.role ? 'selected' : ''}>${r === 'pending' ? 'Remover acesso' : ROLE_LABEL[r]}</option>`).join('')}
+          ${['member', 'officer', 'leader'].map((r) => `<option value="${r}" ${r === m.role ? 'selected' : ''}>${ROLE_LABEL[r]}</option>`).join('')}
+          <option value="former">Remover do clã…</option>
         </select>`;
       }
-      if (isOfficer() && m.role === 'member') return `<span class="role-tag">${ROLE_LABEL[m.role]}</span> <button class="btn small ghost danger" data-revoke="${esc(m.id)}">Remover</button>`;
+      if (isOfficer() && m.role === 'member') return `<span class="role-tag">${ROLE_LABEL[m.role]}</span> <button class="btn small ghost danger" data-remove="${esc(m.id)}">Remover</button>`;
       return `<span class="role-tag ${m.role}">${ROLE_LABEL[m.role]}</span>`;
     };
     const phoneLink = (m) => {
@@ -1817,8 +1953,13 @@
         ${isOfficer() ? '<button class="btn small" id="btn-csv" title="Baixar planilha (CSV separado por ;)">⬇ Exportar CSV</button>' : ''}</div>
       ${isOfficer() ? `<input type="search" id="m-search" class="search" placeholder="Buscar por nome atual ou antigo…" value="${esc(M.q)}">` : ''}
       ${isOfficer() && pending.length ? `<h2>Aguardando aprovação (${pending.length})</h2>
-        <div class="card" style="margin-bottom:20px">${pending.map((m) => row(m, `<button class="btn small primary" data-approve="${esc(m.id)}">Aprovar</button>`)).join('')}</div>` : ''}
+        <div class="card" style="margin-bottom:20px">${pending.map((m) => row(m, `<button class="btn small ghost danger" data-remove="${esc(m.id)}">Recusar</button>
+          <button class="btn small primary" data-approve="${esc(m.id)}">Aprovar</button>`)).join('')}</div>` : ''}
       <div class="card">${active.map((m) => row(m, roleControl(m))).join('')}</div>
+      ${isOfficer() && former.length ? `<details class="former-box"${M.q ? ' open' : ''}>
+        <summary>Ex-membros (${former.length}) <span class="muted small">· saíram ou foram removidos; o histórico é mantido</span></summary>
+        <div class="card">${former.map((m) => row(m, `${leftInfo(m)}${amLeader ? `<button class="btn small" data-readmit="${esc(m.id)}">Readmitir</button>` : ''}`)).join('')}</div>
+      </details>` : ''}
       ${isOfficer() ? '<p class="muted small">Novos membros aparecem aqui depois do primeiro login com o Discord. Só o líder pode promover oficiais. Telefones são visíveis apenas para oficiais e líder.</p>' : ''}`;
 
     const change = async (id, role, msg) => {
@@ -1827,6 +1968,9 @@
     const applySearch = () => {
       const q = M.q.trim().toLowerCase();
       main.querySelectorAll('.member[data-search]').forEach((r) => { r.hidden = !!q && !r.dataset.search.includes(q); });
+      // Se a busca encontrar algum ex-membro, abre a lista deles
+      const fb = main.querySelector('.former-box');
+      if (fb && q) fb.open = [...fb.querySelectorAll('.member')].some((r) => !r.hidden);
     };
     $('#m-search')?.addEventListener('input', (e) => { M.q = e.target.value; applySearch(); });
     // Clique na linha abre o perfil (exceto em botões, seletores e links)
@@ -1843,12 +1987,16 @@
       try { await exportMembersCsv(phones); } catch (err) { fail(err); } finally { e.target.disabled = false; }
     });
     main.querySelectorAll('[data-approve]').forEach((b) => b.addEventListener('click', () => change(b.dataset.approve, 'member', 'Membro aprovado')));
-    main.querySelectorAll('[data-revoke]').forEach((b) => b.addEventListener('click', async () => {
-      if (await confirmDialog('Remover o acesso deste membro? Ele voltará para “aguardando aprovação”.', 'Remover')) change(b.dataset.revoke, 'pending', 'Acesso removido');
+    main.querySelectorAll('[data-remove]').forEach((b) => b.addEventListener('click', () => {
+      openRemoveDialog(state.members.find((x) => x.id === b.dataset.remove), viewMembers);
     }));
-    main.querySelectorAll('[data-role]').forEach((s) => s.addEventListener('change', async () => {
+    main.querySelectorAll('[data-readmit]').forEach((b) => b.addEventListener('click', async () => {
+      const m = state.members.find((x) => x.id === b.dataset.readmit);
+      if (await confirmDialog(`Readmitir ${displayName(m)} como Membro? O histórico anterior continua guardado.`, 'Readmitir')) change(m.id, 'member', 'Membro readmitido');
+    }));
+    main.querySelectorAll('[data-role]').forEach((s) => s.addEventListener('change', () => {
       const m = state.members.find((x) => x.id === s.dataset.role);
-      if (s.value === 'pending' && !(await confirmDialog(`Remover o acesso de ${displayName(m)}?`, 'Remover'))) { s.value = m.role; return; }
+      if (s.value === 'former') { s.value = m.role; openRemoveDialog(m, viewMembers); return; }
       change(s.dataset.role, s.value, 'Cargo atualizado');
     }));
   }
@@ -2005,7 +2153,7 @@
       : tm ? 'teams' : ev ? 'event' : 'upcoming';
     renderHeader(key);
     if (!state.user) return viewLogin();
-    if (!isMember()) return viewPending();
+    if (!isMember()) return state.me?.role === 'former' ? viewFormer() : viewPending();
     try {
       if (key === 'past') await viewEvents(true);
       else if (mp) await viewMyPanel(decodeURIComponent(mp[1]));
