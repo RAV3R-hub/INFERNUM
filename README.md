@@ -135,6 +135,12 @@ Membros comuns não conseguem abrir o perfil de outra pessoa. O painel mostra:
 A lista já vem marcada com quem confirmou "Vou"; basta desmarcar quem faltou e marcar quem apareceu sem avisar.
 
 **Membros** (oficiais e líder):
+- **Remover do clã:** o líder escolhe "Remover do clã…" no seletor de cargo; o oficial usa o botão "Remover", que só aparece para membros comuns. Informe um motivo (opcional).
+  A pessoa perde o acesso e vai para a lista recolhida **Ex-membros**, no fim da página, com a data, quem removeu e o motivo.
+  Presenças passadas, alterações e anotações ficam guardadas. Somente as respostas e vagas em times de eventos futuros são apagadas, e o telefone é descartado.
+- **Recusar:** em "Aguardando aprovação", o botão **Recusar** move a pessoa direto para Ex-membros.
+- **Voltar ao clã:** se um ex-membro entrar de novo no site, ele vê "Você não faz mais parte do clã" e pode clicar em **Pedir para voltar**. O pedido aparece em "Aguardando aprovação". O líder também pode clicar em **Readmitir** na lista de ex-membros.
+- **Histórico no clã:** no perfil de cada membro aparecem todas as mudanças de cargo (entrou, aprovado, promovido, removido, voltou), com data, quem fez e o motivo.
 - **Histórico:** cada mudança de nome do personagem, nome do Discord, classe ou atributos fica registrada com a data. O botão 🕘 ao lado do membro mostra o histórico, com a diferença de cada atributo (ex.: Potência 4.692 → 5.332, +640).
 - **Nome e foto do Discord** são atualizados automaticamente a cada login.
 - **Busca:** encontra um membro pelo nome atual ou por um nome antigo, que aparece como "antes: …".
