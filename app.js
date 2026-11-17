@@ -712,7 +712,7 @@
     if (isMember()) {
       const links = [['#/', 'Próximos', 'upcoming'], ['#/passados', 'Passados', 'past'], ['#/news', 'Malah News', 'news']];
       if (isOfficer()) links.push(['#/membros', 'Membros', 'members'], ['#/frequencia', 'Frequência', 'freq']);
-      links.push(['#/perfil', 'Meu perfil', 'profile']);
+      links.push(['#/perfil', 'Meu perfil', 'profile'], ['#/utils', 'Utils', 'utils']);
       nav.innerHTML = links.map(([href, label, key]) => `<a href="${href}" class="${currentKey === key ? 'active' : ''}">${label}${key === 'news' && hasUnreadNews() ? '<span class="dot-new" title="Edição nova"></span>' : ''}</a>`).join('');
     } else nav.innerHTML = '';
 
@@ -2623,6 +2623,30 @@
     });
   }
 
+  // ---------- Utils: links úteis (todos os membros) ----------
+
+  const UTIL_LINKS = [
+    { icon: '⚔️', title: 'Builds', desc: 'Builds das classes, com itens e gemas recomendados', url: 'https://diablo.tv/builds' },
+    { icon: '💎', title: 'Gemas', desc: 'Lista das gemas lendárias e seus efeitos', url: 'https://diablo.tv/legendary-gems' },
+    { icon: '🏆', title: 'Rank PvP Mundial', desc: 'Ranking mundial dos jogadores', url: 'https://diablo.tv/leaderboards' },
+    { icon: '💬', title: 'Reddit', desc: 'Comunidade r/DiabloImmortal: notícias, dúvidas e discussões', url: 'https://www.reddit.com/r/DiabloImmortal/' },
+    { icon: '📜', title: 'Patch Notes NA', desc: 'Notícias e atualizações oficiais da Blizzard (Ocidente)', url: 'https://news.blizzard.com/en-us/feed/diablo-immortal' },
+    { icon: '🐉', title: 'Patch Notes CN', desc: 'Notícias do servidor chinês, que recebe as novidades antes', url: 'https://di.blizzard.cn/news/index.html' },
+  ];
+
+  function viewUtils() {
+    main.innerHTML = `
+      <div class="page-head"><h1>Utils</h1><span class="muted">Links úteis para o clã</span></div>
+      <div class="util-grid">
+        ${UTIL_LINKS.map((l) => `<a class="card util-card" href="${esc(l.url)}" target="_blank" rel="noopener noreferrer">
+          <span class="util-icon" aria-hidden="true">${l.icon}</span>
+          <span class="util-body"><b>${esc(l.title)}</b><span class="muted small">${esc(l.desc)}</span>
+            <span class="util-host">${esc(new URL(l.url).hostname.replace(/^www\./, ''))} ↗</span></span>
+        </a>`).join('')}
+      </div>
+      <p class="muted small">Os links abrem em uma nova aba.</p>`;
+  }
+
   // ---------- Membros ----------
 
   const M = { q: '' };
@@ -2909,7 +2933,7 @@
     const ev = h.match(/^\/evento\/(\d+)$/);
     const tm = h.match(/^\/evento\/(\d+)\/times$/);
     const mp = h.match(/^\/membro\/([\w%-]+)$/); // perfil de um membro (oficiais e líder)
-    const key = h === '/passados' ? 'past' : h === '/frequencia' ? 'freq' : h === '/news' ? 'news'
+    const key = h === '/passados' ? 'past' : h === '/frequencia' ? 'freq' : h === '/news' ? 'news' : h === '/utils' ? 'utils'
       : h === '/perfil' ? 'profile' : h === '/membros' ? (isOfficer() ? 'members' : 'profile') : mp ? 'members'
       : tm ? 'teams' : ev ? 'event' : 'upcoming';
     renderHeader(key);
@@ -2918,6 +2942,7 @@
     try {
       if (key === 'past') await viewEvents(true);
       else if (key === 'news') await viewNews();
+      else if (key === 'utils') viewUtils();
       else if (mp) await viewMyPanel(decodeURIComponent(mp[1]));
       else if (key === 'profile') await viewMyPanel();
       else if (key === 'members') await viewMembers();
