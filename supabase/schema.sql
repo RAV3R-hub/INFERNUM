@@ -196,6 +196,24 @@ select p.id, null, p.role, 'Registro inicial (antes do histórico do clã)', p.c
   from public.profiles p
  where not exists (select 1 from public.membership_log m where m.user_id = p.id);
 
+-- ---------- Malah News -------------------------------------------------
+-- Edições (imagens) publicadas por oficiais e líder; membros veem.
+create table if not exists public.news_posts (
+  id           bigint generated always as identity primary key,
+  title        text not null check (char_length(title) between 1 and 120),
+  caption      text check (caption is null or char_length(caption) <= 2000),
+  image_path   text not null,                 -- caminho do arquivo no bucket "news"
+  author_id    uuid default auth.uid() references public.profiles(id) on delete set null,
+  published_at timestamptz not null default now(),
+  edited_at    timestamptz
+);
+create index if not exists news_posts_published_idx on public.news_posts (published_at desc);
+
+-- Espaço PRIVADO para as imagens (até 10 MB cada; só imagens)
+insert into storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
+values ('news', 'news', false, 10485760, array['image/png', 'image/jpeg', 'image/webp', 'image/gif'])
+on conflict (id) do nothing;
+
 -- ---------- Funções auxiliares ----------------------------------------
 
 create or replace function public.my_role() returns text
@@ -518,6 +536,37 @@ alter table public.profile_history enable row level security;
 alter table public.event_types enable row level security;
 alter table public.member_notes enable row level security;
 alter table public.membership_log enable row level security;
+alter table public.news_posts enable row level security;
+
+-- Malah News: membros veem; oficiais e líder publicam, editam e apagam.
+drop policy if exists "news_select" on public.news_posts;
+create policy "news_select" on public.news_posts
+  for select to authenticated using (public.is_member());
+
+drop policy if exists "news_insert" on public.news_posts;
+create policy "news_insert" on public.news_posts
+  for insert to authenticated with check (public.is_officer() and author_id = auth.uid());
+
+drop policy if exists "news_update" on public.news_posts;
+create policy "news_update" on public.news_posts
+  for update to authenticated using (public.is_officer()) with check (public.is_officer());
+
+drop policy if exists "news_delete" on public.news_posts;
+create policy "news_delete" on public.news_posts
+  for delete to authenticated using (public.is_officer());
+
+-- Imagens do bucket "news": só membros veem; só oficiais e líder enviam/apagam.
+drop policy if exists "news_images_select" on storage.objects;
+create policy "news_images_select" on storage.objects
+  for select to authenticated using (bucket_id = 'news' and public.is_member());
+
+drop policy if exists "news_images_insert" on storage.objects;
+create policy "news_images_insert" on storage.objects
+  for insert to authenticated with check (bucket_id = 'news' and public.is_officer());
+
+drop policy if exists "news_images_delete" on storage.objects;
+create policy "news_images_delete" on storage.objects
+  for delete to authenticated using (bucket_id = 'news' and public.is_officer());
 
 -- Histórico no clã: oficiais e líder veem de todos; cada pessoa vê o próprio. Só o banco escreve.
 drop policy if exists "membership_log_select" on public.membership_log;

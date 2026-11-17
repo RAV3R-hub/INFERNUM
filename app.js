@@ -125,6 +125,33 @@
       async setRole(userId, role) { ok(await sb.rpc('set_member_role', { target: userId, new_role: role })); },
       async removeMember(userId, reason) { ok(await sb.rpc('remove_member', { target: userId, reason: reason || '' })); },
       async requestRejoin() { ok(await sb.rpc('request_rejoin')); },
+      // ----- Malah News (imagens no bucket privado "news") -----
+      async news() {
+        const rows = ok(await sb.from('news_posts').select('*').order('published_at', { ascending: false }).limit(60));
+        if (!rows.length) return rows;
+        const { data, error } = await sb.storage.from('news').createSignedUrls(rows.map((r) => r.image_path), 3600);
+        if (error) throw error;
+        const urls = Object.fromEntries((data || []).map((d) => [d.path, d.signedUrl]));
+        rows.forEach((r) => { r.image_url = urls[r.image_path] || null; });
+        return rows;
+      },
+      async latestNewsAt() {
+        const rows = ok(await sb.from('news_posts').select('published_at').order('published_at', { ascending: false }).limit(1));
+        return rows[0]?.published_at || null;
+      },
+      async createNews({ file, title, caption }) {
+        const ext = { 'image/webp': 'webp', 'image/png': 'png', 'image/gif': 'gif' }[file.type] || 'jpg';
+        const path = `${new Date().getFullYear()}/${crypto.randomUUID()}.${ext}`;
+        const up = await sb.storage.from('news').upload(path, file, { contentType: file.type, upsert: false });
+        if (up.error) throw up.error;
+        const { error } = await sb.from('news_posts').insert({ title, caption: caption || null, image_path: path });
+        if (error) { await sb.storage.from('news').remove([path]); throw error; }
+      },
+      async updateNews(id, fields) { ok(await sb.from('news_posts').update({ ...fields, edited_at: new Date().toISOString() }).eq('id', id)); },
+      async deleteNews(post) {
+        ok(await sb.from('news_posts').delete().eq('id', post.id));
+        await sb.storage.from('news').remove([post.image_path]);
+      },
       async membershipLog(userId) {
         let q = sb.from('membership_log').select('*').order('changed_at', { ascending: false });
         if (userId) q = q.eq('user_id', userId);
@@ -198,6 +225,21 @@
       { id: 900, member_id: 'u5', author_id: 'u1', body: 'Avisou que troca de turno no trabalho às quintas; pode chegar atrasado na Guerra.', created_at: day(-3, 22) },
       { id: 901, member_id: 'u2', author_id: 'u0', body: 'Ótimo shotcaller. Considerar para liderar uma sala de Exaltação.', created_at: day(-10, 21) },
     ];
+    // Malah News: uma edição de exemplo (imagem desenhada aqui mesmo, sem arquivos externos)
+    const demoNewsSvg = `<svg xmlns="http://www.w3.org/2000/svg" width="800" height="1100" viewBox="0 0 800 1100">
+      <rect width="800" height="1100" fill="#efe1c2"/><rect x="20" y="20" width="760" height="1060" fill="none" stroke="#5a2a12" stroke-width="6"/>
+      <text x="400" y="120" font-family="Georgia,serif" font-size="84" font-weight="700" text-anchor="middle" fill="#2a0d07">MALAH NEWS</text>
+      <text x="400" y="170" font-family="Georgia,serif" font-size="22" text-anchor="middle" fill="#6b3b1a">EDIÇÃO DE DEMONSTRAÇÃO</text>
+      <line x1="60" y1="200" x2="740" y2="200" stroke="#5a2a12" stroke-width="3"/>
+      <text x="400" y="320" font-family="Georgia,serif" font-size="96" font-weight="700" text-anchor="middle" fill="#9b1b10">INFERNUM</text>
+      <text x="400" y="390" font-family="Georgia,serif" font-size="36" text-anchor="middle" fill="#2a0d07">VENCE MAIS UMA GUERRA!</text>
+      <rect x="80" y="440" width="640" height="420" fill="#d9c49a" stroke="#5a2a12" stroke-width="3"/>
+      <text x="400" y="670" font-family="Georgia,serif" font-size="30" text-anchor="middle" fill="#5a2a12">(aqui vai a sua arte)</text>
+      <text x="400" y="960" font-family="Georgia,serif" font-size="30" font-weight="700" text-anchor="middle" fill="#2a0d07">LEIA HOJE. RIA AMANHÃ. CHORE NA GUERRA.</text>
+    </svg>`;
+    db.news = [{ id: 950, title: 'Malah News — edição de exemplo', caption: 'Assim aparecem as edições: clique na imagem para abrir no tamanho original.', image_path: 'demo',
+      image_url: `data:image/svg+xml;charset=utf-8,${encodeURIComponent(demoNewsSvg)}`, author_id: 'u1', published_at: day(-1, 19), edited_at: null }];
+
     // Histórico no clã (entradas, aprovações, promoções e saídas)
     db.mlog = [];
     const addLog = (user_id, from_role, to_role, at, changed_by = null, reason = null) =>
@@ -369,6 +411,15 @@
         db.mlog.push({ id: db.mlog.length + 1, user_id: p.id, from_role: 'former', to_role: 'pending', changed_by: p.id, reason: 'Pediu para voltar ao clã', changed_at: new Date().toISOString() });
         p.role = 'pending';
       },
+      // Malah News na demonstração: imagens ficam só na memória do navegador
+      async news() { return db.news.slice().sort((a, b) => Date.parse(b.published_at) - Date.parse(a.published_at)).map((n) => ({ ...n })); },
+      async latestNewsAt() { return db.news.reduce((m, n) => (!m || n.published_at > m ? n.published_at : m), null); },
+      async createNews({ file, title, caption }) {
+        if (!isOfficer()) throw new Error('Só oficiais e o líder podem publicar');
+        db.news.push({ id: db.nextId++, title, caption: caption || null, image_path: 'demo', image_url: URL.createObjectURL(file), author_id: state.user.id, published_at: new Date().toISOString(), edited_at: null });
+      },
+      async updateNews(id, fields) { Object.assign(db.news.find((n) => n.id === id), fields, { edited_at: new Date().toISOString() }); },
+      async deleteNews(post) { db.news = db.news.filter((n) => n.id !== post.id); },
       async membershipLog(userId) {
         return db.mlog.filter((h) => (!userId || h.user_id === userId) && (isOfficer() || h.user_id === state.user.id))
           .sort((a, b) => Date.parse(b.changed_at) - Date.parse(a.changed_at)).map((h) => ({ ...h }));
@@ -542,10 +593,10 @@
 
     const nav = $('#nav');
     if (isMember()) {
-      const links = [['#/', 'Próximos', 'upcoming'], ['#/passados', 'Passados', 'past']];
+      const links = [['#/', 'Próximos', 'upcoming'], ['#/passados', 'Passados', 'past'], ['#/news', 'Malah News', 'news']];
       if (isOfficer()) links.push(['#/membros', 'Membros', 'members'], ['#/frequencia', 'Frequência', 'freq']);
       links.push(['#/perfil', 'Meu perfil', 'profile']);
-      nav.innerHTML = links.map(([href, label, key]) => `<a href="${href}" class="${route === key ? 'active' : ''}">${label}</a>`).join('');
+      nav.innerHTML = links.map(([href, label, key]) => `<a href="${href}" class="${route === key ? 'active' : ''}">${label}${key === 'news' && hasUnreadNews() ? '<span class="dot-new" title="Edição nova"></span>' : ''}</a>`).join('');
     } else nav.innerHTML = '';
 
     const box = $('#userbox');
@@ -1728,6 +1779,135 @@
     toast(`${rows.length} membros exportados`);
   }
 
+  // ---------- Malah News ----------
+
+  // Aviso de edição nova no menu: compara com a última edição vista neste navegador
+  function hasUnreadNews() {
+    if (!state.latestNews) return false;
+    try { return (localStorage.getItem('news-seen') || '') < state.latestNews; } catch { return false; }
+  }
+  function markNewsSeen() {
+    try { if (state.latestNews) localStorage.setItem('news-seen', state.latestNews); } catch { /* ignora */ }
+  }
+
+  // Reduz imagens muito grandes antes do envio (economiza espaço; GIF fica como está para manter a animação)
+  async function prepareImage(file) {
+    const MAX_W = 2000;
+    const MAX_BYTES = 1.5 * 1024 * 1024;
+    if (file.type === 'image/gif') return file;
+    const img = await createImageBitmap(file).catch(() => null);
+    if (!img) return file;
+    if (file.size <= MAX_BYTES && img.width <= MAX_W) return file;
+    const scale = Math.min(1, MAX_W / img.width);
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.round(img.width * scale);
+    canvas.height = Math.round(img.height * scale);
+    canvas.getContext('2d').drawImage(img, 0, 0, canvas.width, canvas.height);
+    const blob = await new Promise((r) => canvas.toBlob(r, 'image/webp', 0.9));
+    return blob && blob.size < file.size ? new File([blob], 'malah-news.webp', { type: 'image/webp' }) : file;
+  }
+
+  async function viewNews() {
+    loading();
+    const posts = await api.news();
+    if (posts[0]) { state.latestNews = posts[0].published_at; markNewsSeen(); renderHeader('news'); }
+    const byId = Object.fromEntries(state.members.map((m) => [m.id, m]));
+    const officer = isOfficer();
+    main.innerHTML = `
+      <div class="page-head">
+        <h1>Malah News</h1>
+        ${officer ? '<button class="btn primary" id="btn-new-news">+ Nova edição</button>' : ''}
+      </div>
+      ${posts.length ? posts.map((p, i) => `<article class="card news-post${i === 0 ? ' latest' : ''}">
+          <div class="news-head">
+            <div class="spacer">
+              <h2>${esc(p.title)}${i === 0 ? ' <span class="badge gold">Mais recente</span>' : ''}</h2>
+              <div class="muted small">${esc(fmtDay(p.published_at))} · ${fmtTime(p.published_at)}${byId[p.author_id] ? ` · por ${esc(displayName(byId[p.author_id]))}` : ''}${p.edited_at ? ' · editado' : ''}</div>
+            </div>
+            ${officer ? `<button class="btn small ghost" data-news-edit="${p.id}">Editar</button>
+              <button class="btn small ghost danger" data-news-del="${p.id}">Apagar</button>` : ''}
+          </div>
+          ${p.image_url
+            ? `<a class="news-img" href="${esc(p.image_url)}" target="_blank" rel="noopener" title="Abrir no tamanho original">
+                <img src="${esc(p.image_url)}" alt="${esc(p.title)}" loading="${i < 2 ? 'eager' : 'lazy'}"></a>`
+            : '<p class="muted">Imagem indisponível.</p>'}
+          ${p.caption ? `<p class="news-caption">${esc(p.caption)}</p>` : ''}
+        </article>`).join('')
+        : `<div class="card empty">Nenhuma edição publicada ainda.${officer ? '<br><br>Publique a primeira em “+ Nova edição”.' : ''}</div>`}`;
+
+    $('#btn-new-news')?.addEventListener('click', () => openNewsForm());
+    main.querySelectorAll('[data-news-edit]').forEach((b) => b.addEventListener('click', () => openNewsForm(posts.find((p) => p.id === Number(b.dataset.newsEdit)))));
+    main.querySelectorAll('[data-news-del]').forEach((b) => b.addEventListener('click', async () => {
+      const post = posts.find((p) => p.id === Number(b.dataset.newsDel));
+      if (!(await confirmDialog(`Apagar a edição “${post.title}”? A imagem também será apagada.`, 'Apagar'))) return;
+      try { await api.deleteNews(post); toast('Edição apagada'); state.latestNews = await api.latestNewsAt().catch(() => null); await viewNews(); } catch (e) { fail(e); }
+    }));
+  }
+
+  // Nova edição (com imagem) ou edição do título/legenda de uma existente
+  function openNewsForm(post) {
+    const editing = !!post;
+    const today = new Date().toLocaleDateString('pt-BR');
+    openDialog(`
+      <form id="news-form" class="stack">
+        <h2>${editing ? 'Editar edição' : 'Nova edição do Malah News'}</h2>
+        ${editing ? '' : `<div class="field">
+          <label for="news-file">Imagem</label>
+          <input id="news-file" type="file" accept="image/png,image/jpeg,image/webp,image/gif" required>
+          <div class="muted small field-hint">PNG, JPG, WEBP ou GIF. Imagens muito grandes são otimizadas automaticamente.</div>
+          <img id="news-preview" class="news-preview" alt="" hidden>
+        </div>`}
+        <div class="field">
+          <label for="news-title">Título</label>
+          <input id="news-title" maxlength="120" required value="${esc(post?.title || `Malah News — ${today}`)}">
+        </div>
+        <div class="field">
+          <label for="news-caption">Legenda <span class="muted small">(opcional)</span></label>
+          <textarea id="news-caption" maxlength="2000" placeholder="Um resumo ou comentário sobre a edição…">${esc(post?.caption || '')}</textarea>
+        </div>
+        <div class="row end">
+          <span class="muted small" id="news-status"></span><span class="spacer"></span>
+          <button type="button" class="btn ghost" data-close>Cancelar</button>
+          <button type="submit" class="btn primary">${editing ? 'Salvar' : 'Publicar'}</button>
+        </div>
+      </form>`, (d) => {
+      const fileIn = $('#news-file', d);
+      fileIn?.addEventListener('change', () => {
+        const f = fileIn.files[0];
+        const prev = $('#news-preview', d);
+        if (prev.src) URL.revokeObjectURL(prev.src);
+        if (f) { prev.src = URL.createObjectURL(f); prev.hidden = false; } else prev.hidden = true;
+      });
+      $('#news-form', d).addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const submit = $('button[type=submit]', d);
+        const status = $('#news-status', d);
+        const title = $('#news-title', d).value.trim();
+        const caption = $('#news-caption', d).value.trim();
+        if (!title) return;
+        submit.disabled = true;
+        try {
+          if (editing) {
+            await api.updateNews(post.id, { title, caption: caption || null });
+            toast('Edição atualizada');
+          } else {
+            const raw = fileIn.files[0];
+            if (!raw) { submit.disabled = false; return; }
+            status.textContent = 'Preparando imagem…';
+            const file = await prepareImage(raw);
+            if (file.size > 10 * 1024 * 1024) throw new Error('A imagem passa de 10 MB mesmo depois de otimizada. Use uma imagem menor.');
+            status.textContent = 'Enviando…';
+            await api.createNews({ file, title, caption });
+            state.latestNews = await api.latestNewsAt().catch(() => null);
+            toast('Edição publicada!');
+          }
+          dlg.close();
+          await viewNews();
+        } catch (err) { fail(err); status.textContent = ''; submit.disabled = false; }
+      });
+    });
+  }
+
   // ---------- Painel individual do membro (menu "Meu perfil") ----------
 
   const P = { days: 90 };
@@ -2148,7 +2328,7 @@
     const ev = h.match(/^\/evento\/(\d+)$/);
     const tm = h.match(/^\/evento\/(\d+)\/times$/);
     const mp = h.match(/^\/membro\/([\w%-]+)$/); // perfil de um membro (oficiais e líder)
-    const key = h === '/passados' ? 'past' : h === '/frequencia' ? 'freq'
+    const key = h === '/passados' ? 'past' : h === '/frequencia' ? 'freq' : h === '/news' ? 'news'
       : h === '/perfil' ? 'profile' : h === '/membros' ? (isOfficer() ? 'members' : 'profile') : mp ? 'members'
       : tm ? 'teams' : ev ? 'event' : 'upcoming';
     renderHeader(key);
@@ -2156,6 +2336,7 @@
     if (!isMember()) return state.me?.role === 'former' ? viewFormer() : viewPending();
     try {
       if (key === 'past') await viewEvents(true);
+      else if (key === 'news') await viewNews();
       else if (mp) await viewMyPanel(decodeURIComponent(mp[1]));
       else if (key === 'profile') await viewMyPanel();
       else if (key === 'members') await viewMembers();
@@ -2182,6 +2363,8 @@
       }
       state.members = isMember() ? await api.members() : [];
       state.types = isMember() ? await api.eventTypes() : [];
+      // Data da edição mais recente do Malah News (para o aviso de "novo" no menu)
+      state.latestNews = isMember() ? await api.latestNewsAt().catch(() => null) : null;
     } catch (e) {
       fail(e);
     }

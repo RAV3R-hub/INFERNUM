@@ -134,6 +134,12 @@ Membros comuns não conseguem abrir o perfil de outra pessoa. O painel mostra:
 **Registrar presença** (oficial ou líder): depois que o evento começa, ele mostra o aviso **📋 Registrar presença**.
 A lista já vem marcada com quem confirmou "Vou"; basta desmarcar quem faltou e marcar quem apareceu sem avisar.
 
+**📰 Malah News** (menu do topo): o jornal do clã, com imagens publicadas por oficiais e líder.
+Todos os membros veem as edições, da mais nova para a mais antiga; clicando na imagem, ela abre no tamanho original.
+Para publicar, oficiais e líder usam **+ Nova edição** e escolhem a imagem (PNG, JPG, WEBP ou GIF), o título e uma legenda opcional. Cada edição pode ser editada (título e legenda) ou apagada.
+As imagens ficam num espaço **privado** do Supabase: só membros logados conseguem vê-las. Imagens muito grandes são otimizadas antes do envio.
+O menu mostra um ponto vermelho quando há uma edição nova que você ainda não viu.
+
 **Membros** (oficiais e líder):
 - **Remover do clã:** o líder escolhe "Remover do clã…" no seletor de cargo; o oficial usa o botão "Remover", que só aparece para membros comuns. Informe um motivo (opcional).
   A pessoa perde o acesso e vai para a lista recolhida **Ex-membros**, no fim da página, com a data, quem removeu e o motivo.
