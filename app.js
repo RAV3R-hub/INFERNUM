@@ -2490,7 +2490,7 @@
       .sort((a, b) => b.n - a.n || a.c.label.localeCompare(b.c.label, 'pt-BR'));
     const noClass = members.filter((m) => !CLASS[m.char_class]).length;
     const classChart = hbars(counts.map(({ c, n }) => ({
-      label: c.label, labelHtml: `${classTag(c.key)}${c.short === c.label ? '' : ` ${esc(c.label)}`}`, value: n, color: c.color,
+      label: c.label, labelHtml: `${classTag(c.key)} ${esc(c.label)}`, value: n, color: c.color,
       title: `${c.label}: ${n} membro(s)`,
     })));
 
