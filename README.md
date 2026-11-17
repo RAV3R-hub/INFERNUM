@@ -134,6 +134,18 @@ Membros comuns não conseguem abrir o perfil de outra pessoa. O painel mostra:
 **Registrar presença** (oficial ou líder): depois que o evento começa, ele mostra o aviso **📋 Registrar presença**.
 A lista já vem marcada com quem confirmou "Vou"; basta desmarcar quem faltou e marcar quem apareceu sem avisar.
 
+**🧑‍✈️ Contas pilotadas** (para quem joga com mais de uma conta do jogo): em **Meu perfil → Contas pilotadas**, o piloto pode:
+- **Cadastrar uma conta sem login**: uma conta do jogo que só ele joga. Ela vai para "Aguardando aprovação" e um oficial ou o líder aprova.
+- **Pedir acesso a uma conta existente** (que já tem dono no site): o dono aprova no perfil dele, ou um oficial ou o líder aprova em **Membros → Pedidos de piloto**.
+
+Depois de aprovado, aparece no topo o seletor **"Respondendo como"**: o piloto escolhe a conta e responde aos eventos (Vou e Não vou, classe e atributos, Discord, pedido de saída) por ela.
+- Cada conta tem a própria frequência, os próprios times e o próprio histórico.
+- Uma conta pode ter vários pilotos, e o dono também continua respondendo.
+- Os oficiais veem quem respondeu (ex.: "respondido por Fulano") e o selo 🧑‍✈️ nas listas e nos times.
+- No painel de times aparece um alerta quando a mesma pessoa controla 2 ou mais contas confirmadas no mesmo evento.
+- O dono pode remover pilotos a qualquer momento; oficiais e líder também, e ainda podem adicionar pilotos direto no perfil da conta.
+- Ao remover do clã alguém que é o único piloto de contas sem login, o site oferece remover essas contas junto.
+
 **📰 Malah News** (menu do topo): o jornal do clã, com imagens publicadas por oficiais e líder.
 Todos os membros veem as edições, da mais nova para a mais antiga; clicando na imagem, ela abre no tamanho original.
 Para publicar, oficiais e líder usam **+ Nova edição** e escolhem a imagem (PNG, JPG, WEBP ou GIF), o título e uma legenda opcional. Cada edição pode ser editada (título e legenda) ou apagada.

@@ -292,11 +292,15 @@ grant  execute on function public.set_member_role(uuid, text) to authenticated;
 --   Líder:   qualquer pessoa (menos ele mesmo).
 --   Oficial: só quem está aguardando aprovação ou é membro comum.
 -- Mantém presenças passadas, histórico e anotações; apaga respostas/vagas de eventos futuros e o telefone.
-create or replace function public.remove_member(target uuid, reason text) returns void
+-- with_managed: remove junto as contas sem login que só essa pessoa pilotava.
+drop function if exists public.remove_member(uuid, text);
+
+create or replace function public.remove_member(target uuid, reason text, with_managed boolean default false) returns void
 language plpgsql security definer set search_path = public as $$
 declare
   me  text := public.my_role();
   cur text;
+  acc uuid;
 begin
   if target = auth.uid() then
     raise exception 'Você não pode remover a si mesmo';
@@ -317,6 +321,25 @@ begin
    using public.events e
    where r.event_id = e.id and r.user_id = target and e.starts_at > now();
   delete from public.member_contacts where user_id = target;
+  -- Contas sem login que só ele pilotava
+  if with_managed then
+    for acc in
+      select a.account_id
+        from public.account_pilots a
+        join public.profiles p on p.id = a.account_id
+       where a.pilot_id = target and a.status = 'approved' and p.managed and p.role <> 'former'
+         and not exists (select 1 from public.account_pilots b
+                          where b.account_id = a.account_id and b.pilot_id <> target and b.status = 'approved')
+    loop
+      perform set_config('infernum.reason', 'Removida junto com o piloto', true);
+      update public.profiles set role = 'former' where id = acc;
+      delete from public.rsvps r
+       using public.events e
+       where r.event_id = e.id and r.user_id = acc and e.starts_at > now();
+    end loop;
+  end if;
+  -- Quem sai do clã deixa de pilotar contas
+  delete from public.account_pilots where pilot_id = target;
 end $$;
 
 -- Ex-membro pede para voltar (aparece de novo em "Aguardando aprovação")
@@ -330,10 +353,10 @@ begin
   update public.profiles set role = 'pending' where id = auth.uid();
 end $$;
 
-revoke execute on function public.remove_member(uuid, text) from public, anon;
-revoke execute on function public.request_rejoin()           from public, anon;
-grant  execute on function public.remove_member(uuid, text) to authenticated;
-grant  execute on function public.request_rejoin()           to authenticated;
+revoke execute on function public.remove_member(uuid, text, boolean) from public, anon;
+revoke execute on function public.request_rejoin()                    from public, anon;
+grant  execute on function public.remove_member(uuid, text, boolean) to authenticated;
+grant  execute on function public.request_rejoin()                    to authenticated;
 
 -- Registra toda mudança de cargo no histórico do clã
 create or replace function public.log_role_change() returns trigger
@@ -341,7 +364,8 @@ language plpgsql security definer set search_path = public as $$
 begin
   if tg_op = 'INSERT' then
     insert into public.membership_log (user_id, from_role, to_role, changed_by, reason)
-    values (new.id, null, new.role, null, 'Primeiro acesso ao site');
+    values (new.id, null, new.role, auth.uid(),
+            coalesce(nullif(current_setting('infernum.reason', true), ''), 'Primeiro acesso ao site'));
   elsif old.role is distinct from new.role then
     insert into public.membership_log (user_id, from_role, to_role, changed_by, reason)
     values (new.id, old.role, new.role, auth.uid(), nullif(current_setting('infernum.reason', true), ''));
@@ -458,27 +482,41 @@ language sql stable security definer set search_path = public as $$
      where e.id = p_event and e.teams_locked and ts.user_id = auth.uid())
 $$;
 
--- Membro pede para sair (quando já não pode mudar a resposta sozinho)
-create or replace function public.request_withdrawal(p_event bigint, p_reason text) returns void
+-- Membro pede para sair (quando já não pode mudar a resposta sozinho).
+-- p_user = a conta do jogo: a do próprio membro (padrão) ou uma conta que ele pilota.
+drop function if exists public.request_withdrawal(bigint, text);
+drop function if exists public.cancel_withdrawal(bigint);
+
+create or replace function public.request_withdrawal(p_event bigint, p_reason text, p_user uuid default null) returns void
 language plpgsql security definer set search_path = public as $$
+declare
+  acct uuid := coalesce(p_user, auth.uid());
 begin
-  if not exists (select 1 from public.rsvps where event_id = p_event and user_id = auth.uid() and going) then
-    raise exception 'Você não está confirmado neste evento';
+  if not public.can_act_as(acct) then
+    raise exception 'Você não pode responder por esta conta';
   end if;
-  if public.can_change_rsvp(p_event) then
-    raise exception 'Você ainda pode mudar sua resposta normalmente';
+  if not exists (select 1 from public.rsvps where event_id = p_event and user_id = acct and going) then
+    raise exception 'Esta conta não está confirmada neste evento';
+  end if;
+  if public.can_change_rsvp_for(p_event, acct) then
+    raise exception 'Esta conta ainda pode mudar a resposta normalmente';
   end if;
   update public.rsvps
      set withdraw_reason = left(coalesce(nullif(trim(p_reason), ''), 'Sem motivo informado'), 300),
          withdraw_requested_at = now()
-   where event_id = p_event and user_id = auth.uid();
+   where event_id = p_event and user_id = acct;
 end $$;
 
-create or replace function public.cancel_withdrawal(p_event bigint) returns void
+create or replace function public.cancel_withdrawal(p_event bigint, p_user uuid default null) returns void
 language plpgsql security definer set search_path = public as $$
+declare
+  acct uuid := coalesce(p_user, auth.uid());
 begin
+  if not public.can_act_as(acct) then
+    raise exception 'Você não pode responder por esta conta';
+  end if;
   update public.rsvps set withdraw_reason = null, withdraw_requested_at = null
-   where event_id = p_event and user_id = auth.uid();
+   where event_id = p_event and user_id = acct;
 end $$;
 
 -- Oficial aceita (vira "Não vou" e sai do time) ou recusa (continua confirmado) o pedido
@@ -498,11 +536,11 @@ begin
   end if;
 end $$;
 
-revoke execute on function public.request_withdrawal(bigint, text)          from public, anon;
-revoke execute on function public.cancel_withdrawal(bigint)                 from public, anon;
+revoke execute on function public.request_withdrawal(bigint, text, uuid)    from public, anon;
+revoke execute on function public.cancel_withdrawal(bigint, uuid)           from public, anon;
 revoke execute on function public.resolve_withdrawal(bigint, uuid, boolean) from public, anon;
-grant  execute on function public.request_withdrawal(bigint, text)          to authenticated;
-grant  execute on function public.cancel_withdrawal(bigint)                 to authenticated;
+grant  execute on function public.request_withdrawal(bigint, text, uuid)    to authenticated;
+grant  execute on function public.cancel_withdrawal(bigint, uuid)           to authenticated;
 grant  execute on function public.resolve_withdrawal(bigint, uuid, boolean) to authenticated;
 
 -- Quem desmarca presença sai automaticamente do time
@@ -709,3 +747,271 @@ drop policy if exists "rsvps_delete" on public.rsvps;
 create policy "rsvps_delete" on public.rsvps
   for delete to authenticated
   using (user_id = auth.uid() and (public.is_officer() or public.can_change_rsvp(event_id)));
+
+
+-- =====================================================================
+--  Contas pilotadas
+--  Um "piloto" joga com mais de uma conta do jogo. Cada conta do jogo é um membro no site:
+--    • conta com login próprio (o dono entra com o Discord dele), que pode ter pilotos autorizados;
+--    • conta sem login (managed = true), cadastrada por um piloto e respondida só pelos pilotos dela.
+--  (Esta seção fica no fim porque substitui algumas regras definidas acima.)
+-- =====================================================================
+
+-- Perfis sem login próprio: o id deixa de precisar existir em auth.users (nenhum dado é alterado)
+alter table public.profiles drop constraint if exists profiles_id_fkey;
+alter table public.profiles alter column id set default gen_random_uuid();
+alter table public.profiles add column if not exists managed boolean not null default false;
+
+-- Quem registrou a resposta (útil quando um piloto responde pela conta)
+alter table public.rsvps add column if not exists answered_by uuid references public.profiles(id) on delete set null;
+
+-- Quem pode pilotar qual conta
+create table if not exists public.account_pilots (
+  account_id   uuid not null references public.profiles(id) on delete cascade,
+  pilot_id     uuid not null references public.profiles(id) on delete cascade,
+  status       text not null default 'pending' check (status in ('pending', 'approved')),
+  reason       text check (reason is null or char_length(reason) <= 300),
+  requested_at timestamptz not null default now(),
+  decided_at   timestamptz,
+  decided_by   uuid references public.profiles(id) on delete set null,
+  primary key (account_id, pilot_id),
+  check (account_id <> pilot_id)
+);
+create index if not exists account_pilots_pilot_idx on public.account_pilots (pilot_id);
+
+-- Posso agir por esta conta? (é a minha, ou sou piloto aprovado dela e membro ativo)
+create or replace function public.can_act_as(p_account uuid) returns boolean
+language sql stable security definer set search_path = public as $$
+  select p_account = auth.uid()
+      or (public.is_member() and exists (
+            select 1 from public.account_pilots
+             where account_id = p_account and pilot_id = auth.uid() and status = 'approved'))
+$$;
+
+-- A conta está ativa no clã?
+create or replace function public.is_active_account(p_account uuid) returns boolean
+language sql stable security definer set search_path = public as $$
+  select coalesce((select role in ('member', 'officer', 'leader') from public.profiles where id = p_account), false)
+$$;
+
+-- A resposta desta conta ainda pode mudar? (prazo aberto e ela não está num time travado)
+create or replace function public.can_change_rsvp_for(p_event bigint, p_account uuid) returns boolean
+language sql stable security definer set search_path = public as $$
+  select public.rsvp_open(p_event) and not exists (
+    select 1 from public.events e
+      join public.team_slots ts on ts.event_id = e.id
+     where e.id = p_event and e.teams_locked and ts.user_id = p_account)
+$$;
+
+-- Times de todas as contas que eu controlo neste evento
+create or replace function public.my_teams(p_event bigint) returns setof text
+language sql stable security definer set search_path = public as $$
+  select ts.team from public.team_slots ts
+   where ts.event_id = p_event
+     and (ts.user_id = auth.uid()
+          or exists (select 1 from public.account_pilots a
+                      where a.account_id = ts.user_id and a.pilot_id = auth.uid() and a.status = 'approved'))
+$$;
+
+-- Registra quem respondeu (Vou / Não vou)
+create or replace function public.set_answered_by() returns trigger
+language plpgsql security definer set search_path = public as $$
+begin
+  if auth.uid() is not null then
+    new.answered_by := auth.uid();
+  end if;
+  return new;
+end $$;
+
+drop trigger if exists rsvps_answered_by on public.rsvps;
+create trigger rsvps_answered_by
+  before insert or update of going on public.rsvps
+  for each row execute function public.set_answered_by();
+
+-- Piloto cadastra uma conta do jogo sem login (fica aguardando aprovação de um oficial)
+create or replace function public.create_piloted_account(
+  p_game_name text, p_char_class text,
+  p_armor integer, p_armor_pen integer, p_potency integer, p_resistance integer, p_resonance integer
+) returns uuid
+language plpgsql security definer set search_path = public as $$
+declare
+  new_id     uuid := gen_random_uuid();
+  pilot_name text;
+begin
+  if not public.is_member() then
+    raise exception 'Só membros aprovados podem cadastrar contas pilotadas';
+  end if;
+  if coalesce(trim(p_game_name), '') = '' then
+    raise exception 'Informe o nome do personagem';
+  end if;
+  select coalesce(nullif(game_name, ''), discord_name) into pilot_name from public.profiles where id = auth.uid();
+  perform set_config('infernum.reason', 'Conta pilotada cadastrada por ' || coalesce(pilot_name, '?'), true);
+  insert into public.profiles (id, discord_name, game_name, role, managed,
+                               char_class, armor, armor_pen, potency, resistance, resonance)
+  values (new_id, '', left(trim(p_game_name), 40), 'pending', true,
+          p_char_class, p_armor, p_armor_pen, p_potency, p_resistance, p_resonance);
+  insert into public.account_pilots (account_id, pilot_id, status, decided_at, decided_by)
+  values (new_id, auth.uid(), 'approved', now(), auth.uid());
+  return new_id;
+end $$;
+
+-- Piloto pede acesso a uma conta que já existe
+create or replace function public.request_pilot_access(p_account uuid, p_reason text) returns void
+language plpgsql security definer set search_path = public as $$
+begin
+  if not public.is_member() then
+    raise exception 'Só membros aprovados podem pedir acesso';
+  end if;
+  if p_account = auth.uid() then
+    raise exception 'Esta já é a sua conta';
+  end if;
+  if not public.is_active_account(p_account) then
+    raise exception 'Conta não encontrada ou fora do clã';
+  end if;
+  if exists (select 1 from public.account_pilots
+              where account_id = p_account and pilot_id = auth.uid() and status = 'approved') then
+    raise exception 'Você já pilota esta conta';
+  end if;
+  insert into public.account_pilots (account_id, pilot_id, status, reason, requested_at)
+  values (p_account, auth.uid(), 'pending', left(nullif(trim(p_reason), ''), 300), now())
+  on conflict (account_id, pilot_id) do update
+     set status = 'pending', reason = excluded.reason, requested_at = now(), decided_at = null, decided_by = null;
+end $$;
+
+-- O dono da conta (ou um oficial/líder) aprova ou recusa o pedido
+create or replace function public.decide_pilot_access(p_account uuid, p_pilot uuid, p_approve boolean) returns void
+language plpgsql security definer set search_path = public as $$
+begin
+  if not (p_account = auth.uid() or public.is_officer()) then
+    raise exception 'Só o dono da conta ou um oficial pode decidir este pedido';
+  end if;
+  if p_approve then
+    update public.account_pilots
+       set status = 'approved', decided_at = now(), decided_by = auth.uid()
+     where account_id = p_account and pilot_id = p_pilot;
+  else
+    delete from public.account_pilots
+     where account_id = p_account and pilot_id = p_pilot and status = 'pending';
+  end if;
+end $$;
+
+-- Tirar um piloto (o dono da conta, o próprio piloto ou um oficial/líder)
+create or replace function public.remove_pilot(p_account uuid, p_pilot uuid) returns void
+language plpgsql security definer set search_path = public as $$
+begin
+  if not (p_account = auth.uid() or p_pilot = auth.uid() or public.is_officer()) then
+    raise exception 'Sem permissão para tirar este piloto';
+  end if;
+  delete from public.account_pilots where account_id = p_account and pilot_id = p_pilot;
+end $$;
+
+-- Oficial/líder autoriza um piloto diretamente
+create or replace function public.add_pilot(p_account uuid, p_pilot uuid) returns void
+language plpgsql security definer set search_path = public as $$
+begin
+  if not public.is_officer() then
+    raise exception 'Só oficiais e o líder podem adicionar pilotos';
+  end if;
+  if p_account = p_pilot then
+    raise exception 'A conta não pode pilotar a si mesma';
+  end if;
+  if not public.is_active_account(p_pilot) then
+    raise exception 'O piloto precisa ser um membro ativo do clã';
+  end if;
+  insert into public.account_pilots (account_id, pilot_id, status, decided_at, decided_by)
+  values (p_account, p_pilot, 'approved', now(), auth.uid())
+  on conflict (account_id, pilot_id) do update
+     set status = 'approved', decided_at = now(), decided_by = auth.uid();
+end $$;
+
+revoke execute on function public.create_piloted_account(text, text, integer, integer, integer, integer, integer) from public, anon;
+revoke execute on function public.request_pilot_access(uuid, text)          from public, anon;
+revoke execute on function public.decide_pilot_access(uuid, uuid, boolean)  from public, anon;
+revoke execute on function public.remove_pilot(uuid, uuid)                  from public, anon;
+revoke execute on function public.add_pilot(uuid, uuid)                     from public, anon;
+grant  execute on function public.create_piloted_account(text, text, integer, integer, integer, integer, integer) to authenticated;
+grant  execute on function public.request_pilot_access(uuid, text)          to authenticated;
+grant  execute on function public.decide_pilot_access(uuid, uuid, boolean)  to authenticated;
+grant  execute on function public.remove_pilot(uuid, uuid)                  to authenticated;
+grant  execute on function public.add_pilot(uuid, uuid)                     to authenticated;
+
+-- Quem vê os vínculos de piloto: oficiais e líder (todos); cada um vê os seus. Só as funções acima escrevem.
+alter table public.account_pilots enable row level security;
+drop policy if exists "pilots_select" on public.account_pilots;
+create policy "pilots_select" on public.account_pilots
+  for select to authenticated
+  using (public.is_officer() or pilot_id = auth.uid() or account_id = auth.uid());
+
+-- ----- Regras atualizadas para considerar as contas que cada um pilota -----
+
+-- Respostas: as contas que eu controlo, oficiais (todas) e colegas dos meus times
+drop policy if exists "rsvps_select" on public.rsvps;
+create policy "rsvps_select" on public.rsvps
+  for select to authenticated using (
+    public.can_act_as(user_id)
+    or public.is_officer()
+    or (public.is_member() and exists (
+          select 1 from public.team_slots ts
+           where ts.event_id = rsvps.event_id
+             and ts.user_id  = rsvps.user_id
+             and ts.team in (select public.my_teams(rsvps.event_id))))
+  );
+
+drop policy if exists "rsvps_insert" on public.rsvps;
+create policy "rsvps_insert" on public.rsvps
+  for insert to authenticated
+  with check (public.can_act_as(user_id) and public.is_active_account(user_id)
+              and (public.is_officer() or public.can_change_rsvp_for(event_id, user_id)));
+
+drop policy if exists "rsvps_update" on public.rsvps;
+create policy "rsvps_update" on public.rsvps
+  for update to authenticated
+  using (public.can_act_as(user_id) and (public.is_officer() or public.can_change_rsvp_for(event_id, user_id)))
+  with check (public.can_act_as(user_id) and public.is_active_account(user_id));
+
+drop policy if exists "rsvps_delete" on public.rsvps;
+create policy "rsvps_delete" on public.rsvps
+  for delete to authenticated
+  using (public.can_act_as(user_id) and (public.is_officer() or public.can_change_rsvp_for(event_id, user_id)));
+
+-- Times: cada membro vê os times das contas que controla
+drop policy if exists "team_slots_select" on public.team_slots;
+create policy "team_slots_select" on public.team_slots
+  for select to authenticated
+  using (public.is_officer() or (public.is_member() and team in (select public.my_teams(event_id))));
+
+-- Perfil: o dono e os pilotos aprovados podem atualizar classe e atributos da conta
+drop policy if exists "profiles_update_own" on public.profiles;
+create policy "profiles_update_own" on public.profiles
+  for update to authenticated
+  using (public.can_act_as(id)) with check (public.can_act_as(id));
+
+-- Presença real, histórico de alterações e histórico no clã das contas que eu controlo
+drop policy if exists "attendance_select" on public.attendance;
+create policy "attendance_select" on public.attendance
+  for select to authenticated using (public.can_act_as(user_id) or public.is_officer());
+
+drop policy if exists "history_select" on public.profile_history;
+create policy "history_select" on public.profile_history
+  for select to authenticated using (public.can_act_as(user_id) or public.is_officer());
+
+drop policy if exists "membership_log_select" on public.membership_log;
+create policy "membership_log_select" on public.membership_log
+  for select to authenticated using (public.can_act_as(user_id) or public.is_officer());
+
+-- Anotações internas: ninguém vê anotações sobre contas que ele mesmo controla
+drop policy if exists "notes_select" on public.member_notes;
+create policy "notes_select" on public.member_notes
+  for select to authenticated
+  using (public.is_officer() and not public.can_act_as(member_id));
+
+drop policy if exists "notes_insert" on public.member_notes;
+create policy "notes_insert" on public.member_notes
+  for insert to authenticated
+  with check (public.is_officer() and author_id = auth.uid() and not public.can_act_as(member_id));
+
+drop policy if exists "notes_delete" on public.member_notes;
+create policy "notes_delete" on public.member_notes
+  for delete to authenticated
+  using (public.is_officer() and not public.can_act_as(member_id)
+         and (author_id = auth.uid() or public.my_role() = 'leader'));
