@@ -154,6 +154,18 @@
         const rows = ok(await sb.from('news_posts').select('published_at').order('published_at', { ascending: false }).limit(1));
         return rows[0]?.published_at || null;
       },
+      async uploadNewsImage(file) {
+        const ext = { 'image/webp': 'webp', 'image/png': 'png', 'image/gif': 'gif' }[file.type] || 'jpg';
+        const path = `${new Date().getFullYear()}/${crypto.randomUUID()}.${ext}`;
+        const up = await sb.storage.from('news').upload(path, file, { contentType: file.type, upsert: false });
+        if (up.error) throw up.error;
+        return path;
+      },
+      async createNewsFromPath({ image_path, title, caption }) {
+        const { error } = await sb.from('news_posts').insert({ title, caption: caption || null, image_path });
+        if (error) throw error;
+      },
+      async removeNewsImage(path) { if (path) await sb.storage.from('news').remove([path]); },
       async createNews({ file, title, caption }) {
         const ext = { 'image/webp': 'webp', 'image/png': 'png', 'image/gif': 'gif' }[file.type] || 'jpg';
         const path = `${new Date().getFullYear()}/${crypto.randomUUID()}.${ext}`;
@@ -161,6 +173,16 @@
         if (up.error) throw up.error;
         const { error } = await sb.from('news_posts').insert({ title, caption: caption || null, image_path: path });
         if (error) { await sb.storage.from('news').remove([path]); throw error; }
+      },
+      // ----- Configurações do líder -----
+      async perms() { return ok(await sb.from('officer_permissions').select('perm_key, mode')); },
+      async setPerm(key, mode) { ok(await sb.from('officer_permissions').upsert({ perm_key: key, mode, updated_by: state.user.id, updated_at: new Date().toISOString() })); },
+      async resetPerms() { ok(await sb.from('officer_permissions').delete().neq('perm_key', '')); },
+      async requests() { return ok(await sb.from('officer_requests').select('*').order('requested_at', { ascending: false }).limit(100)); },
+      async createRequest(r) { ok(await sb.from('officer_requests').insert(r)); },
+      async decideRequest(id, status, note, summary) {
+        ok(await sb.from('officer_requests').update({ status, note: note ? String(note).slice(0, 300) : null, decided_by: state.user.id, decided_at: new Date().toISOString(), ...(summary ? { summary: summary.slice(0, 500) } : {}) })
+          .eq('id', id).eq('status', 'pending'));
       },
       async updateNews(id, fields) { ok(await sb.from('news_posts').update({ ...fields, edited_at: new Date().toISOString() }).eq('id', id)); },
       async deleteNews(post) {
@@ -298,6 +320,8 @@
     addLog('u1', 'member', 'officer', day(-90, 20), 'u0');
     addLog('f1', 'member', 'former', day(-20, 21), 'u0', 'Inativo há 2 meses');
     // Pilotos: você pilota o "Ceifador" (sem login) e a conta do Rúnico; o Brasa pediu para pilotar a sua
+    db.perms = {};
+    db.requests = [];
     db.pilots = [
       { account_id: 'm1', pilot_id: 'u0', status: 'approved', reason: null, requested_at: day(-30, 20), decided_at: day(-30, 20), decided_by: 'u0' },
       { account_id: 'u12', pilot_id: 'u0', status: 'approved', reason: 'Jogo na conta dele nas Guerras', requested_at: day(-15, 20), decided_at: day(-15, 21), decided_by: 'u12' },
@@ -539,6 +563,25 @@
         db.news.push({ id: db.nextId++, title, caption: caption || null, image_path: 'demo', image_url: URL.createObjectURL(file), author_id: state.user.id, published_at: new Date().toISOString(), edited_at: null });
       },
       async updateNews(id, fields) { Object.assign(db.news.find((n) => n.id === id), fields, { edited_at: new Date().toISOString() }); },
+      async uploadNewsImage(file) { return URL.createObjectURL(file); },
+      async createNewsFromPath({ image_path, title, caption }) {
+        db.news.push({ id: db.nextId++, title, caption: caption || null, image_path, image_url: image_path, author_id: state.user.id, published_at: new Date().toISOString(), edited_at: null });
+      },
+      async removeNewsImage() { /* na demonstração a imagem fica só na memória */ },
+      // ----- Configurações do líder (na memória) -----
+      async perms() { return isOfficer() ? Object.entries(db.perms).map(([perm_key, mode]) => ({ perm_key, mode })) : []; },
+      async setPerm(key, mode) { if (!isLeader()) throw new Error('Só o líder altera as configurações'); db.perms[key] = mode; },
+      async resetPerms() { if (!isLeader()) throw new Error('Só o líder altera as configurações'); db.perms = {}; },
+      async requests() { return db.requests.filter((r) => isLeader() || r.requested_by === state.user.id).map((r) => ({ ...r })); },
+      async createRequest(r) {
+        if (state.me?.role !== 'officer' || db.perms[r.perm_key] !== 'approval') throw new Error('Esta ação não está marcada para aprovação');
+        db.requests.unshift({ id: db.nextId++, ...r, requested_by: state.user.id, requested_at: new Date().toISOString(), status: 'pending', decided_by: null, decided_at: null, note: null });
+      },
+      async decideRequest(id, status, note, summary) {
+        if (!isLeader()) throw new Error('Só o líder decide');
+        const r = db.requests.find((x) => x.id === id && x.status === 'pending');
+        if (r) Object.assign(r, { status, note: note || null, decided_by: state.user.id, decided_at: new Date().toISOString(), ...(summary ? { summary } : {}) });
+      },
       async deleteNews(post) { db.news = db.news.filter((n) => n.id !== post.id); },
       async membershipLog(userId) {
         return db.mlog.filter((h) => (!userId || h.user_id === userId) && (isOfficer() || canActAsDemo(h.user_id)))
@@ -591,7 +634,144 @@
     };
   }
 
-  const api = DEMO ? demoApi() : supabaseApi();
+  // =====================================================================
+  //  Configurações do líder: permissões dos oficiais
+  //  Para cada função o líder escolhe: Permitido, Precisa de aprovação ou Bloqueado.
+  //  O site esconde/segura as ações e o banco (gatilhos) garante a regra.
+  // =====================================================================
+  const PERMS = [
+    { group: 'Eventos', items: [
+      { key: 'event_create', label: 'Criar e repetir eventos', approval: true },
+      { key: 'event_edit', label: 'Editar eventos', approval: true },
+      { key: 'event_delete', label: 'Apagar eventos', approval: true },
+    ] },
+    { group: 'Times e presença', items: [
+      { key: 'teams_build', label: 'Montar e revisar times', desc: 'Formato, sugestão, renomear e salvar os times' },
+      { key: 'teams_lock', label: 'Travar e destravar times' },
+      { key: 'withdraw_decide', label: 'Decidir pedidos de saída' },
+      { key: 'attendance', label: 'Registrar presença real' },
+    ] },
+    { group: 'Membros', items: [
+      { key: 'member_approve', label: 'Aprovar novos membros', approval: true },
+      { key: 'member_remove', label: 'Remover ou recusar membros', approval: true },
+      { key: 'pilots', label: 'Gerenciar pilotos de contas', desc: 'Aprovar pedidos de piloto e adicionar pilotos' },
+      { key: 'notes', label: 'Anotações internas', desc: 'Ver e escrever anotações sobre os membros' },
+      { key: 'view_phone', label: 'Ver telefones' },
+      { key: 'stats', label: 'Ver Estatísticas do clã', desc: 'Só esconde na tela' },
+      { key: 'csv', label: 'Exportar lista em CSV', desc: 'Só esconde na tela' },
+      { key: 'freq_view', label: 'Ver o painel de Frequência', desc: 'Só esconde na tela' },
+    ] },
+    { group: 'Malah News', items: [
+      { key: 'news_publish', label: 'Publicar e editar edições', approval: true },
+      { key: 'news_delete', label: 'Apagar edições', approval: true },
+    ] },
+  ];
+  const PERM_BY_KEY = Object.fromEntries(PERMS.flatMap((g) => g.items).map((p) => [p.key, p]));
+  const PERM_MODES = [['allow', 'Permitido'], ['approval', 'Precisa de aprovação'], ['deny', 'Bloqueado']];
+  // settings: modo de cada função; requests: pedidos que eu posso ver (líder: todos; oficial: os meus)
+  const perms = { settings: {}, requests: [], ready: false };
+  const isLeader = () => state.me?.role === 'leader';
+  const permMode = (key) => perms.settings[key] || 'allow';
+  // O oficial (ou o líder) pode ver/usar esta função?
+  const can = (key) => isOfficer() && (isLeader() || permMode(key) !== 'deny');
+  const pendingRequests = () => perms.requests.filter((r) => r.status === 'pending');
+  class PendingApproval extends Error {}
+
+  // Qual permissão cada operação usa, e como descrevê-la para o líder
+  const nameOf = (id) => displayName(memberById(id));
+  const GATED = {
+    createEvents: (raw, rows) => ['event_create', `Criar o evento “${rows[0]?.title}” em ${fmtShortDate(rows[0]?.starts_at)} às ${fmtTime(rows[0]?.starts_at)}${rows.length > 1 ? ` (repetindo por ${rows.length} semanas)` : ''}`],
+    updateEvent: async (raw, id, row) => {
+      if ('teams_locked' in row) return ['teams_lock'];
+      if ('team_format' in row || 'team_count' in row || 'team_names' in row) return ['teams_build'];
+      const ev = await raw.event(id);
+      if (!ev) throw new Error('O evento não existe mais');
+      return ['event_edit', `Editar o evento “${ev.title}”${row.title && row.title !== ev.title ? ` (novo nome: “${row.title}”)` : ''}${row.starts_at && Date.parse(row.starts_at) !== Date.parse(ev.starts_at) ? ` · nova data ${fmtShortDate(row.starts_at)} às ${fmtTime(row.starts_at)}` : ''}`];
+    },
+    deleteEvent: async (raw, id) => {
+      const ev = await raw.event(id);
+      if (!ev) throw new Error('O evento não existe mais');
+      return ['event_delete', `Apagar o evento “${ev.title}” de ${fmtShortDate(ev.starts_at)}`];
+    },
+    saveTeams: () => ['teams_build'],
+    renameTeam: () => ['teams_build'],
+    removeTeams: () => ['teams_build'],
+    saveAttendance: () => ['attendance'],
+    resolveWithdrawal: () => ['withdraw_decide'],
+    setRole: (raw, id, role) => (role === 'member' && memberById(id)?.role === 'pending' ? ['member_approve', `Aprovar ${nameOf(id)} como membro do clã`] : null),
+    removeMember: (raw, id, reason) => ['member_remove', `${memberById(id)?.role === 'pending' ? 'Recusar a entrada de' : 'Remover do clã'} ${nameOf(id)}${reason ? ` · motivo: “${reason}”` : ''}`],
+    addNote: () => ['notes'],
+    addPilot: () => ['pilots'],
+    decidePilotAccess: (raw, acc) => (acc === state.user.id ? null : ['pilots']),
+    createNews: (raw, o) => ['news_publish', `Publicar a edição “${o.title}” na Malah News`],
+    createNewsFromPath: (raw, o) => ['news_publish', `Publicar a edição “${o.title}” na Malah News`],
+    updateNews: (raw, id, f) => ['news_publish', `Editar a edição “${f.title}” da Malah News`],
+    deleteNews: (raw, post) => ['news_delete', `Apagar a edição “${post.title}” da Malah News`],
+  };
+  // Para ir para a fila de aprovação, a operação precisa virar dados (JSON)
+  const PREPARE = {
+    createNews: async (raw, o) => ['createNewsFromPath', [{ image_path: await raw.uploadNewsImage(o.file), title: o.title, caption: o.caption || null }]],
+    deleteNews: (raw, post) => ['deleteNews', [{ id: post.id, image_path: post.image_path, title: post.title }]],
+  };
+  // Ao aprovar, o site só executa operações conhecidas e só com os campos esperados
+  const only = (obj, keys) => Object.fromEntries(keys.filter((k) => obj && k in obj).map((k) => [k, obj[k]]));
+  const SANITIZE = {
+    createEvents: ([rows]) => [(rows || []).slice(0, 12).map((r) => only(r, ['title', 'description', 'type_id', 'rsvp_close_minutes', 'starts_at', 'team_format', 'team_count', 'team_names']))],
+    updateEvent: ([id, row]) => [Number(id), only(row, ['title', 'description', 'type_id', 'rsvp_close_minutes', 'starts_at'])],
+    deleteEvent: ([id]) => [Number(id)],
+    setRole: ([id]) => [String(id), 'member'],
+    removeMember: ([id, reason, withManaged]) => [String(id), String(reason || '').slice(0, 300), !!withManaged],
+    createNewsFromPath: ([o]) => [{ image_path: String(o?.image_path || ''), title: String(o?.title || ''), caption: o?.caption ? String(o.caption) : null }],
+    updateNews: ([id, f]) => [Number(id), { title: String(f?.title || ''), caption: f?.caption ? String(f.caption) : null }],
+    deleteNews: ([p]) => [{ id: Number(p?.id), image_path: String(p?.image_path || ''), title: String(p?.title || '') }],
+  };
+  let RAW = null; // operações sem a checagem de permissão (o líder usa ao aprovar)
+  function withPermissions(raw) {
+    RAW = raw;
+    const wrapped = { ...raw };
+    Object.entries(GATED).forEach(([name, describe]) => {
+      if (!raw[name]) return;
+      wrapped[name] = async (...args) => {
+        if (!isOfficer() || isLeader()) return raw[name](...args);
+        const g = await describe(raw, ...args);
+        if (!g) return raw[name](...args);
+        const [key, text] = g;
+        const mode = permMode(key);
+        if (mode === 'deny') throw new Error(`O líder bloqueou esta ação para oficiais (${PERM_BY_KEY[key].label})`);
+        if (mode === 'approval' && PERM_BY_KEY[key].approval) {
+          const [method, margs] = PREPARE[name] ? await PREPARE[name](raw, ...args) : [name, args];
+          await raw.createRequest({ perm_key: key, method, args: JSON.parse(JSON.stringify(margs)), summary: text.slice(0, 500) });
+          throw new PendingApproval(text);
+        }
+        return raw[name](...args);
+      };
+    });
+    return wrapped;
+  }
+  // Carrega as regras (oficiais e líder). Se o SQL novo ainda não foi rodado, tudo fica "Permitido".
+  async function loadPerms() {
+    if (!isOfficer()) { perms.settings = {}; perms.requests = []; return; }
+    try {
+      const [rows, reqs] = await Promise.all([RAW.perms(), RAW.requests()]);
+      perms.settings = Object.fromEntries(rows.map((r) => [r.perm_key, r.mode]));
+      perms.requests = reqs;
+      perms.ready = true;
+    } catch (e) {
+      console.warn('Configurações do líder indisponíveis (rode o SQL novo no Supabase)', e);
+      perms.settings = {}; perms.requests = []; perms.ready = false;
+    }
+  }
+  // O líder confere o pedido de novo (com os dados atuais) antes de executar
+  async function checkRequest(r) {
+    const san = SANITIZE[r.method];
+    if (!san || !GATED[r.method]) throw new Error('Operação desconhecida');
+    const args = san(Array.isArray(r.args) ? r.args : []);
+    const g = await GATED[r.method](RAW, ...args);
+    if (!g || g[0] !== r.perm_key) throw new Error('O pedido não confere mais com a situação atual');
+    return { args, text: g[1] };
+  }
+
+  const api = withPermissions(DEMO ? demoApi() : supabaseApi());
   if (DEMO) window.__demo = { state, api, actingId: () => actingId(), myAccounts: () => myAccounts() }; // ajuda nos testes (só na demonstração)
 
   // =====================================================================
@@ -689,7 +869,16 @@
     toastTimer = setTimeout(() => { t.className = 'toast'; }, 3500);
   }
   function fail(err) {
+    // Ação que precisa do líder: não é erro, foi enviada para aprovação
+    if (err instanceof PendingApproval) {
+      if (dlg.open) dlg.close();
+      toast('⏳ Enviado para aprovação do líder. Acompanhe em “Solicitações”.');
+      renderHeader(currentRouteKey());
+      return;
+    }
     console.error(err);
+    const blocked = String(err?.message || '').match(/^O líder não permite esta ação para oficiais \(([a-z_]+)\)/);
+    if (blocked) { toast(`O líder bloqueou esta ação para oficiais (${PERM_BY_KEY[blocked[1]]?.label || blocked[1]})`, true); return; }
     toast(err?.message ? `Erro: ${err.message}` : 'Algo deu errado.', true);
   }
 
@@ -763,9 +952,14 @@
     const nav = $('#nav');
     if (isMember()) {
       const links = [['#/', 'Próximos', 'upcoming'], ['#/passados', 'Passados', 'past'], ['#/news', 'Malah News', 'news']];
-      if (isOfficer()) links.push(['#/membros', 'Membros', 'members'], ['#/frequencia', 'Frequência', 'freq']);
+      if (isOfficer()) links.push(['#/membros', 'Membros', 'members']);
+      if (can('freq_view')) links.push(['#/frequencia', 'Frequência', 'freq']);
       links.push(['#/perfil', 'Meu perfil', 'profile'], ['#/utils', 'Utils', 'utils']);
-      nav.innerHTML = links.map(([href, label, key]) => `<a href="${href}" class="${currentKey === key ? 'active' : ''}">${label}${key === 'news' && hasUnreadNews() ? '<span class="dot-new" title="Edição nova"></span>' : ''}</a>`).join('');
+      if (isLeader()) links.push(['#/config', 'Configurações', 'config']);
+      else if (isOfficer()) links.push(['#/solicitacoes', 'Solicitações', 'requests']);
+      const dot = (key) => (key === 'news' && hasUnreadNews() ? '<span class="dot-new" title="Edição nova"></span>'
+        : key === 'config' && pendingRequests().length ? `<span class="nav-count" title="Aprovações pendentes">${pendingRequests().length}</span>` : '');
+      nav.innerHTML = links.map(([href, label, key]) => `<a href="${href}" class="${currentKey === key ? 'active' : ''}">${label}${dot(key)}</a>`).join('');
     } else nav.innerHTML = '';
 
     const box = $('#userbox');
@@ -954,7 +1148,7 @@
     const live = hasStarted(ev) && isOpen(ev);
     const pct = (n) => (c.total ? (100 * n) / c.total : 0);
     const team = myTeam(ev);
-    const needsAttendance = isOfficer() && hasStarted(ev) && !ev.attendance?.length;
+    const needsAttendance = can('attendance') && hasStarted(ev) && !ev.attendance?.length;
     return `<div class="card event">
       <div class="time">${fmtTime(ev.starts_at)}<small>${esc(fmtShortWeekday(ev.starts_at))}</small></div>
       <div>
@@ -1100,10 +1294,10 @@
     loading();
     const events = await api.events(past);
     const head = `<div class="page-head"><h1>${past ? 'Eventos passados' : 'Próximos eventos'}</h1>
-      ${isOfficer() && !past ? '<button class="btn primary" id="btn-new">+ Novo evento</button>' : ''}</div>`;
+      ${can('event_create') && !past ? '<button class="btn primary" id="btn-new">+ Novo evento</button>' : ''}</div>`;
     const body = events.length
       ? groupByDay(events)
-      : `<div class="card empty">${past ? 'Nenhum evento passado ainda.' : 'Nenhum evento agendado.'}${isOfficer() && !past ? '<br><br>Crie o primeiro em “+ Novo evento”.' : ''}</div>`;
+      : `<div class="card empty">${past ? 'Nenhum evento passado ainda.' : 'Nenhum evento agendado.'}${can('event_create') && !past ? '<br><br>Crie o primeiro em “+ Novo evento”.' : ''}</div>`;
     main.innerHTML = head + body;
     $('#btn-new')?.addEventListener('click', () => openEventForm());
     bindRsvp(main, events, () => viewEvents(past));
@@ -1219,7 +1413,7 @@
 
     // Resumo da presença real (oficiais)
     let attendanceBox = '';
-    if (isOfficer() && hasStarted(ev)) {
+    if (can('attendance') && hasStarted(ev)) {
       const att = ev.attendance || [];
       if (att.length) {
         const present = att.filter((a) => a.present).length;
@@ -1235,7 +1429,7 @@
     }
 
     // Pedidos de saída (oficiais e líder decidem)
-    const requests = officer ? ev.rsvps.filter((r) => r.going && r.withdraw_requested_at).map(withP).filter((x) => x.p) : [];
+    const requests = can('withdraw_decide') ? ev.rsvps.filter((r) => r.going && r.withdraw_requested_at).map(withP).filter((x) => x.p) : [];
     const wdBox = requests.length ? `<div class="card withdraw-box">
         <h3>⚠ Pedidos de saída (${requests.length})</h3>
         ${requests.map(({ p, r }) => `<div class="wd-row">
@@ -1264,10 +1458,10 @@
           <button class="btn small ghost" id="btn-copy">🔗 Copiar link</button>
           ${isOfficer() ? `<button class="btn small ghost" id="btn-copy-list">📋 Copiar lista</button>
             <span class="spacer"></span>
-            <a class="btn small primary" id="btn-teams" href="#/evento/${ev.id}/times">⚔ ${finished ? 'Revisar times' : 'Montar times'}</a>
-            <button class="btn small" id="btn-edit">Editar</button>
-            <button class="btn small" id="btn-dup">Repetir na próxima semana</button>
-            <button class="btn small danger" id="btn-del">Apagar</button>` : ''}
+            ${can('teams_build') ? `<a class="btn small primary" id="btn-teams" href="#/evento/${ev.id}/times">⚔ ${finished ? 'Revisar times' : 'Montar times'}</a>` : ''}
+            ${can('event_edit') ? '<button class="btn small" id="btn-edit">Editar</button>' : ''}
+            ${can('event_create') ? '<button class="btn small" id="btn-dup">Repetir na próxima semana</button>' : ''}
+            ${can('event_delete') ? '<button class="btn small danger" id="btn-del">Apagar</button>' : ''}` : ''}
         </div>
       </div>
       ${wdBox}
@@ -1323,23 +1517,23 @@
           + `✖ Não vão (${no.length}): ${names(no)}\n… Sem resposta (${none.length}): ${names(none)}`;
         copy(text, 'Lista copiada — cole no Discord');
       });
-      $('#btn-edit').addEventListener('click', () => openEventForm(ev));
+      $('#btn-edit')?.addEventListener('click', () => openEventForm(ev));
       // Evento já finalizado: avisa antes de abrir a revisão dos times
-      $('#btn-teams').addEventListener('click', async (e) => {
+      $('#btn-teams')?.addEventListener('click', async (e) => {
         if (!finished) return;
         e.preventDefault();
         if (await confirmDialog('Atenção: este evento já foi finalizado. Você está revisando os times de um evento encerrado; as mudanças alteram o histórico de quem participou de cada time. Continuar?', 'Revisar times')) {
           location.hash = `#/evento/${ev.id}/times`;
         }
       });
-      $('#btn-dup').addEventListener('click', async () => {
+      $('#btn-dup')?.addEventListener('click', async () => {
         const d = new Date(ev.starts_at); d.setDate(d.getDate() + 7);
         try {
           await api.createEvents([{ title: ev.title, description: ev.description || null, type_id: ev.type_id ?? null, rsvp_close_minutes: ev.rsvp_close_minutes ?? null, starts_at: d.toISOString(), team_format: ev.team_format, team_count: ev.team_count, ...(ev.team_names?.some(Boolean) ? { team_names: ev.team_names } : {}) }]);
           toast(`Criado para ${d.toLocaleDateString('pt-BR')}`);
         } catch (e) { fail(e); }
       });
-      $('#btn-del').addEventListener('click', async () => {
+      $('#btn-del')?.addEventListener('click', async () => {
         if (!(await confirmDialog(`Apagar “${ev.title}”? As respostas, os times e a presença também serão apagados.`, 'Apagar'))) return;
         try { await api.deleteEvent(ev.id); toast('Evento apagado'); location.hash = '#/'; } catch (e) { fail(e); }
       });
@@ -1430,7 +1624,7 @@
   }
 
   async function viewFrequency() {
-    if (!isOfficer()) { location.hash = '#/'; return; }
+    if (!can('freq_view')) { location.hash = '#/'; return; }
     loading();
     const since = F.days ? new Date(Date.now() - F.days * 86400000).toISOString() : null;
     const all = await api.history(since);
@@ -1566,7 +1760,7 @@
   }
 
   async function viewTeams(id) {
-    if (!isOfficer()) { location.hash = `#/evento/${id}`; return; }
+    if (!can('teams_build')) { location.hash = `#/evento/${id}`; return; }
     loading();
     const ev = await api.event(id);
     if (!ev) { main.innerHTML = '<div class="card empty">Evento não encontrado.<br><br><a href="#/">Voltar</a></div>'; return; }
@@ -1623,7 +1817,7 @@
             <button class="btn small primary" id="btn-suggest" title="Monta uma sugestão de times pela Ressonância">✨ Sugerir times</button>
             <button class="btn small" id="btn-copy-teams">📋 Copiar times</button>
             <button class="btn small ghost danger" id="btn-clear">Limpar</button>
-            <button class="btn small ${ev.teams_locked ? 'locked' : ''}" id="btn-lock" title="${ev.teams_locked ? 'Destravar: membros voltam a poder sair sozinhos' : 'Travar: quem está escalado só sai pedindo ao oficial'}">${ev.teams_locked ? '🔒 Travados' : '🔓 Travar times'}</button>` : ''}
+            ${can('teams_lock') ? '' : '<!--'}<button class="btn small ${ev.teams_locked ? 'locked' : ''}" id="btn-lock" title="${ev.teams_locked ? 'Destravar: membros voltam a poder sair sozinhos' : 'Travar: quem está escalado só sai pedindo ao oficial'}">${ev.teams_locked ? '🔒 Travados' : '🔓 Travar times'}</button>${can('teams_lock') ? '' : '-->'}` : ''}
         </div>
       </div>
       ${ev.team_format ? saveBar() : ''}
@@ -2072,7 +2266,8 @@
     const posts = await api.news();
     if (posts[0]) { state.latestNews = posts[0].published_at; markNewsSeen(); renderHeader('news'); }
     const byId = Object.fromEntries(state.members.map((m) => [m.id, m]));
-    const officer = isOfficer();
+    const officer = can('news_publish');
+    const canDel = can('news_delete');
     main.innerHTML = `
       <div class="page-head">
         <h1>Malah News</h1>
@@ -2084,8 +2279,8 @@
               <h2>${esc(p.title)}${i === 0 ? ' <span class="badge gold">Mais recente</span>' : ''}</h2>
               <div class="muted small">${esc(fmtDay(p.published_at))} · ${fmtTime(p.published_at)}${byId[p.author_id] ? ` · por ${esc(displayName(byId[p.author_id]))}` : ''}${p.edited_at ? ' · editado' : ''}</div>
             </div>
-            ${officer ? `<button class="btn small ghost" data-news-edit="${p.id}">Editar</button>
-              <button class="btn small ghost danger" data-news-del="${p.id}">Apagar</button>` : ''}
+            ${officer ? `<button class="btn small ghost" data-news-edit="${p.id}">Editar</button>` : ''}
+            ${canDel ? `<button class="btn small ghost danger" data-news-del="${p.id}">Apagar</button>` : ''}
           </div>
           ${p.image_url
             ? `<a class="news-img" href="${esc(p.image_url)}" target="_blank" rel="noopener" title="Abrir no tamanho original">
@@ -2180,7 +2375,7 @@
     if (!self && !isOfficer() && !canActAs(targetId)) { location.hash = '#/perfil'; return; }
     loading();
     const since = P.days ? new Date(Date.now() - P.days * 86400000).toISOString() : null;
-    const showNotes = !self && isOfficer() && !canActAs(targetId);
+    const showNotes = !self && can('notes') && !canActAs(targetId);
     const [members, past, upcoming, changes, allNotes, mlog, pilots] = await Promise.all([
       api.members(), api.history(since), api.events(false), api.profileHistory(), showNotes ? api.notes() : Promise.resolve([]),
       api.membershipLog(targetId).catch(() => []), // se o banco ainda não tiver o histórico, mostra vazio
@@ -2190,7 +2385,7 @@
     state.members = members;
     const me = members.find((m) => m.id === targetId) || (self ? state.me : null);
     if (!me) { main.innerHTML = '<div class="card empty">Membro não encontrado.<br><br><a href="#/membros">Voltar</a></div>'; return; }
-    const phone = !self && isOfficer() ? (await api.contacts()).find((c) => c.user_id === me.id)?.phone : null;
+    const phone = !self && can('view_phone') ? (await api.contacts()).find((c) => c.user_id === me.id)?.phone : null;
     const who = displayName(me);
     const [f] = computeFrequency(past, [me]);
     const myChanges = changes.filter((h) => h.user_id === me.id);
@@ -2365,7 +2560,7 @@
         ${mineRows || '<p class="muted small">Nenhuma ainda.</p>'}
         <h3 class="pilot-sub">Quem pode pilotar a sua conta</h3>` : ''}
       ${pilotRows || `<p class="muted small">${self ? 'Ninguém pilota a sua conta.' : 'Nenhum piloto.'}</p>`}
-      ${!self && isOfficer() ? '<button class="btn small" id="btn-add-pilot" style="margin-top:8px">+ Adicionar piloto</button>' : ''}
+      ${!self && can('pilots') ? '<button class="btn small" id="btn-add-pilot" style="margin-top:8px">+ Adicionar piloto</button>' : ''}
     </div>`;
   }
 
@@ -2739,6 +2934,132 @@
     { icon: '🎧', title: 'Discord Oficial', desc: 'Servidor oficial do Diablo Immortal no Discord', url: 'https://discord.com/invite/QBkEExsmQa' },
   ];
 
+  // ---------- Configurações (só o líder) ----------
+  const fmtWhen = (iso) => `${new Date(iso).toLocaleDateString('pt-BR')} ${fmtTime(iso)}`;
+  const STATUS_LABEL = { pending: '⏳ Aguardando o líder', approved: '✔ Aprovada', rejected: '✖ Recusada', failed: '⚠ Não aplicada' };
+  const permGroupOf = (key) => PERMS.find((g) => g.items.some((i) => i.key === key))?.group || '';
+
+  function requestRow(r, { actions = false } = {}) {
+    return `<div class="req-row ${esc(r.status)}">
+      <div class="spacer">
+        <div><span class="req-area">${esc(permGroupOf(r.perm_key))}</span> ${esc(r.summary)}</div>
+        <div class="muted small">pedido por <b>${esc(nameOf(r.requested_by))}</b> em ${fmtWhen(r.requested_at)}${r.decided_at ? ` · ${STATUS_LABEL[r.status] || ''} em ${fmtWhen(r.decided_at)}${r.decided_by && r.decided_by !== r.requested_by ? ` por ${esc(nameOf(r.decided_by))}` : ''}` : ''}${r.note ? ` · “${esc(r.note)}”` : ''}</div>
+      </div>
+      ${actions ? `<button class="btn small ghost danger" data-req-reject="${r.id}">Recusar</button>
+        <button class="btn small primary" data-req-approve="${r.id}">Aprovar</button>` : `<span class="req-status ${esc(r.status)}">${STATUS_LABEL[r.status] || esc(r.status)}</span>`}
+    </div>`;
+  }
+
+  const sqlMissingCard = () => '<div class="card attend-sum warn">As Configurações ainda não estão ativas no banco. Rode no Supabase o trecho “Configurações do líder” do arquivo <code>supabase/schema.sql</code> e recarregue a página.</div>';
+
+  async function viewConfig() {
+    if (!isLeader()) { location.hash = '#/'; return; }
+    await loadPerms();
+    renderHeader('config');
+    const pend = pendingRequests();
+    const done = perms.requests.filter((r) => r.status !== 'pending').slice(0, 15);
+    main.innerHTML = `
+      <div class="page-head"><h1>Configurações</h1><span class="badge gold">Só o líder</span></div>
+      ${DEMO ? '<p class="muted small">Modo demonstração: as escolhas valem até recarregar a página. Para testar como oficial, use “Ver como” na faixa amarela.</p>' : ''}
+      ${!DEMO && !perms.ready ? sqlMissingCard() : ''}
+
+      <h2>Aprovações pendentes ${pend.length ? `<span class="badge warn">${pend.length}</span>` : ''}</h2>
+      <div class="card req-list">${pend.length ? pend.map((r) => requestRow(r, { actions: true })).join('') : '<p class="muted small" style="margin:0">Nenhuma solicitação aguardando você.</p>'}</div>
+
+      <div class="section-head" style="margin-top:24px"><h2>Permissões dos oficiais</h2>
+        <button class="btn small ghost" id="perm-reset">Restaurar padrão (tudo permitido)</button></div>
+      <p class="muted small">Você (líder) sempre pode tudo. <b>Precisa de aprovação</b>: a ação do oficial só acontece depois que você aprovar aqui. <b>Bloqueado</b>: a opção some para os oficiais e o banco recusa a ação.</p>
+      ${PERMS.map((g) => `<div class="card perm-group">
+        <h3>${esc(g.group)}</h3>
+        ${g.items.map((p) => `<div class="perm-row">
+          <div class="spacer"><b>${esc(p.label)}</b>${p.desc ? `<div class="muted small">${esc(p.desc)}</div>` : ''}</div>
+          <div class="seg" role="group" aria-label="${esc(p.label)}">
+            ${PERM_MODES.filter(([m]) => m !== 'approval' || p.approval).map(([m, l]) => `<button class="${permMode(p.key) === m ? 'on' : ''} mode-${m}" data-perm="${p.key}" data-mode="${m}">${l}</button>`).join('')}
+          </div>
+        </div>`).join('')}
+      </div>`).join('')}
+
+      ${done.length ? `<h2 style="margin-top:24px">Decisões recentes</h2><div class="card req-list">${done.map((r) => requestRow(r)).join('')}</div>` : ''}`;
+
+    main.querySelectorAll('[data-perm]').forEach((b) => b.addEventListener('click', async () => {
+      if (permMode(b.dataset.perm) === b.dataset.mode) return;
+      main.querySelectorAll('[data-perm]').forEach((x) => { x.disabled = true; });
+      try {
+        await RAW.setPerm(b.dataset.perm, b.dataset.mode);
+        toast(`${PERM_BY_KEY[b.dataset.perm].label}: ${PERM_MODES.find(([m]) => m === b.dataset.mode)[1]}`);
+      } catch (e) { fail(e); }
+      await viewConfig();
+    }));
+    $('#perm-reset').addEventListener('click', async () => {
+      if (!(await confirmDialog('Voltar todas as permissões dos oficiais para “Permitido”?', 'Restaurar'))) return;
+      try { await RAW.resetPerms(); toast('Permissões restauradas'); } catch (e) { fail(e); }
+      await viewConfig();
+    });
+    main.querySelectorAll('[data-req-approve]').forEach((b) => b.addEventListener('click', async () => {
+      const r = perms.requests.find((x) => x.id === Number(b.dataset.reqApprove));
+      let checked;
+      try { checked = await checkRequest(r); } catch (e) {
+        if (await confirmDialog(`Este pedido não pode ser aplicado: ${e.message}. Marcar como “não aplicada”?`, 'Marcar')) {
+          try { await RAW.decideRequest(r.id, 'failed', e.message); } catch (err) { fail(err); }
+          await viewConfig();
+        }
+        return;
+      }
+      if (!(await confirmDialog(`Aprovar e aplicar agora? ${checked.text}`, 'Aprovar'))) return;
+      try {
+        await RAW[r.method](...checked.args);
+      } catch (e) {
+        fail(e);
+        try { await RAW.decideRequest(r.id, 'failed', e?.message || 'Erro ao aplicar'); } catch (err) { console.error(err); }
+        await viewConfig();
+        return;
+      }
+      try { await RAW.decideRequest(r.id, 'approved', null, checked.text); toast('Aprovado e aplicado'); } catch (e) { fail(e); }
+      state.members = await api.members();
+      await viewConfig();
+    }));
+    main.querySelectorAll('[data-req-reject]').forEach((b) => b.addEventListener('click', () => {
+      const r = perms.requests.find((x) => x.id === Number(b.dataset.reqReject));
+      openDialog(`<form id="rj-form" class="stack">
+          <h2>Recusar solicitação</h2>
+          <p class="muted small" style="margin:0">${esc(r.summary)}</p>
+          <div class="field"><label for="rj-note">Motivo <span class="muted small">(opcional, o oficial vê)</span></label>
+            <textarea id="rj-note" maxlength="300" placeholder="Ex.: já temos evento nesse horário"></textarea></div>
+          <div class="row end"><button type="button" class="btn ghost" data-close>Cancelar</button><button type="submit" class="btn danger">Recusar</button></div>
+        </form>`, (d) => {
+        $('#rj-form', d).addEventListener('submit', async (e) => {
+          e.preventDefault();
+          const submit = $('button[type=submit]', d);
+          submit.disabled = true;
+          try {
+            await RAW.decideRequest(r.id, 'rejected', $('#rj-note', d).value.trim() || null);
+            // Imagem enviada para uma edição recusada não fica guardada
+            if (r.method === 'createNewsFromPath') await RAW.removeNewsImage(r.args?.[0]?.image_path).catch(() => {});
+            dlg.close();
+            toast('Solicitação recusada');
+            await viewConfig();
+          } catch (err) { fail(err); submit.disabled = false; }
+        });
+      });
+    }));
+  }
+
+  // ---------- Minhas solicitações (oficiais) ----------
+  async function viewRequests() {
+    if (!isOfficer() || isLeader()) { location.hash = '#/'; return; }
+    await loadPerms();
+    const mine = perms.requests.filter((r) => r.requested_by === state.user.id);
+    const rules = PERMS.flatMap((g) => g.items).filter((p) => permMode(p.key) !== 'allow');
+    main.innerHTML = `
+      <div class="page-head"><h1>Minhas solicitações</h1></div>
+      ${!DEMO && !perms.ready ? sqlMissingCard() : ''}
+      <p class="muted small">Ações que dependem da aprovação do líder ficam aqui até ele decidir. Nada muda no clã enquanto estiverem aguardando.</p>
+      <div class="card req-list">${mine.length ? mine.map((r) => requestRow(r)).join('') : '<p class="muted small" style="margin:0">Você ainda não enviou nenhuma solicitação.</p>'}</div>
+      <h2 style="margin-top:24px">Regras definidas pelo líder</h2>
+      <div class="card">${rules.length ? rules.map((p) => `<div class="perm-row"><span class="spacer">${esc(p.label)}</span><span class="req-status ${permMode(p.key) === 'deny' ? 'rejected' : 'pending'}">${permMode(p.key) === 'deny' ? 'Bloqueado' : 'Precisa de aprovação'}</span></div>`).join('')
+        : '<p class="muted small" style="margin:0">Tudo permitido para oficiais.</p>'}</div>`;
+  }
+
   function viewUtils() {
     main.innerHTML = `
       <div class="page-head"><h1>Utils</h1><span class="muted">Links úteis para o clã</span></div>
@@ -2759,13 +3080,13 @@
   async function viewMembers() {
     loading();
     state.members = await api.members();
-    const phones = isOfficer() ? Object.fromEntries((await api.contacts()).map((c) => [c.user_id, c.phone])) : {};
+    const phones = can('view_phone') ? Object.fromEntries((await api.contacts()).map((c) => [c.user_id, c.phone])) : {};
     state.pilots = await api.pilots().catch(() => state.pilots || []);
-    const pilotRequests = isOfficer() ? state.pilots.filter((p) => p.status === 'pending') : [];
+    const pilotRequests = can('pilots') ? state.pilots.filter((p) => p.status === 'pending') : [];
     const histBy = {};
     if (isOfficer()) (await api.profileHistory()).forEach((h) => { (histBy[h.user_id] ||= []).push(h); });
     const noteCount = {};
-    if (isOfficer()) (await api.notes()).forEach((n) => { noteCount[n.member_id] = (noteCount[n.member_id] || 0) + 1; });
+    if (can('notes')) (await api.notes()).forEach((n) => { noteCount[n.member_id] = (noteCount[n.member_id] || 0) + 1; });
     const noteBadge = (m) => (noteCount[m.id] ? `<span class="note-badge" title="${noteCount[m.id]} anotação(ões) interna(s)">📝 ${noteCount[m.id]}</span>` : '');
     const oldNames = (id) => (histBy[id] || []).flatMap((h) => ['game_name', 'discord_name'].map((f) => h.changes?.[f]?.[0])).filter(Boolean);
     const sorted = [...state.members].sort((a, b) => (ROLE_ORDER[a.role] - ROLE_ORDER[b.role]) || byName(a, b));
@@ -2791,7 +3112,7 @@
           <option value="former">Remover do clã…</option>
         </select>`;
       }
-      if (isOfficer() && m.role === 'member') return `<span class="role-tag">${ROLE_LABEL[m.role]}</span> <button class="btn small ghost danger" data-remove="${esc(m.id)}">Remover</button>`;
+      if (can('member_remove') && m.role === 'member') return `<span class="role-tag">${ROLE_LABEL[m.role]}</span> <button class="btn small ghost danger" data-remove="${esc(m.id)}">Remover</button>`;
       return `<span class="role-tag ${m.role}">${ROLE_LABEL[m.role]}</span>`;
     };
     const phoneLink = (m) => {
@@ -2811,8 +3132,8 @@
 
     main.innerHTML = `
       <div class="page-head"><h1>Membros</h1><span class="muted">${active.length} ativos</span>
-        ${isOfficer() ? '<button class="btn small" id="btn-csv" title="Baixar planilha (CSV separado por ;)">⬇ Exportar CSV</button>' : ''}</div>
-      ${isOfficer() ? `<details class="stats-box" id="stats-box"${S.open ? ' open' : ''}>
+        ${can('csv') ? '<button class="btn small" id="btn-csv" title="Baixar planilha (CSV separado por ;)">⬇ Exportar CSV</button>' : ''}</div>
+      ${can('stats') ? `<details class="stats-box" id="stats-box"${S.open ? ' open' : ''}>
         <summary>📊 Estatísticas do clã <span class="muted small">· composição, engajamento e evolução</span></summary>
         <div id="clan-stats"></div>
       </details>` : ''}
@@ -2828,8 +3149,8 @@
           </div>`;
         }).join('')}</div>` : ''}
       ${isOfficer() && pending.length ? `<h2>Aguardando aprovação (${pending.length})</h2>
-        <div class="card" style="margin-bottom:20px">${pending.map((m) => row(m, `<button class="btn small ghost danger" data-remove="${esc(m.id)}">Recusar</button>
-          <button class="btn small primary" data-approve="${esc(m.id)}">Aprovar</button>`)).join('')}</div>` : ''}
+        <div class="card" style="margin-bottom:20px">${pending.map((m) => row(m, `${can('member_remove') ? `<button class="btn small ghost danger" data-remove="${esc(m.id)}">Recusar</button>` : ''}
+          ${can('member_approve') ? `<button class="btn small primary" data-approve="${esc(m.id)}">Aprovar</button>` : ''}`)).join('')}</div>` : ''}
       <div class="card">${active.map((m) => row(m, roleControl(m))).join('')}</div>
       ${isOfficer() && former.length ? `<details class="former-box"${M.q ? ' open' : ''}>
         <summary>Ex-membros (${former.length}) <span class="muted small">· saíram ou foram removidos; o histórico é mantido</span></summary>
@@ -3105,6 +3426,7 @@
     const tm = h.match(/^\/evento\/(\d+)\/times$/);
     const mp = h.match(/^\/membro\/([\w%-]+)$/); // perfil de um membro (oficiais e líder)
     const key = h === '/passados' ? 'past' : h === '/frequencia' ? 'freq' : h === '/news' ? 'news' : h === '/utils' ? 'utils'
+      : h === '/config' ? 'config' : h === '/solicitacoes' ? 'requests'
       : h === '/perfil' ? 'profile' : h === '/membros' ? (isOfficer() ? 'members' : 'profile') : mp ? 'members'
       : tm ? 'teams' : ev ? 'event' : 'upcoming';
     return { ev, tm, mp, key };
@@ -3113,6 +3435,7 @@
 
   async function route() {
     const { ev, tm, mp, key } = parseRoute();
+    if (state.user && isOfficer()) await loadPerms();
     renderHeader(key);
     if (!state.user) return viewLogin();
     if (!isMember()) return state.me?.role === 'former' ? viewFormer() : viewPending();
@@ -3120,6 +3443,8 @@
       if (key === 'past') await viewEvents(true);
       else if (key === 'news') await viewNews();
       else if (key === 'utils') viewUtils();
+      else if (key === 'config') await viewConfig();
+      else if (key === 'requests') await viewRequests();
       else if (mp) await viewMyPanel(decodeURIComponent(mp[1]));
       else if (key === 'profile') await viewMyPanel();
       else if (key === 'members') await viewMembers();
