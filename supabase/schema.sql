@@ -1015,3 +1015,85 @@ create policy "notes_delete" on public.member_notes
   for delete to authenticated
   using (public.is_officer() and not public.can_act_as(member_id)
          and (author_id = auth.uid() or public.my_role() = 'leader'));
+
+-- =====================================================================
+--  Novembro/2026: foto de perfil própria, nomes dos times (formato
+--  "Outros") e tipo "Torre Amaldiçoada". Só ADICIONA coisas: nenhum
+--  dado existente é alterado ou apagado.
+-- =====================================================================
+
+-- ---------- Foto de perfil enviada pelo membro ----------------------
+-- custom_avatar_url: foto enviada pelo site (tem prioridade sobre a do Discord)
+-- avatar_hidden:     o membro removeu a foto (mostra só a inicial do nome)
+alter table public.profiles add column if not exists custom_avatar_url text;
+alter table public.profiles add column if not exists avatar_hidden boolean not null default false;
+grant update (custom_avatar_url, avatar_hidden) on public.profiles to authenticated;
+
+-- Espaço PÚBLICO para as fotos (até 2 MB; o site já envia reduzida para 256×256)
+insert into storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
+values ('avatars', 'avatars', true, 2097152, array['image/webp', 'image/jpeg', 'image/png'])
+on conflict (id) do nothing;
+
+-- Cada pessoa só envia/troca/apaga arquivos dentro da própria pasta (avatars/<seu id>/...)
+drop policy if exists "avatars_insert" on storage.objects;
+create policy "avatars_insert" on storage.objects
+  for insert to authenticated
+  with check (bucket_id = 'avatars' and (storage.foldername(name))[1] = auth.uid()::text);
+
+drop policy if exists "avatars_update" on storage.objects;
+create policy "avatars_update" on storage.objects
+  for update to authenticated
+  using (bucket_id = 'avatars' and (storage.foldername(name))[1] = auth.uid()::text);
+
+drop policy if exists "avatars_delete" on storage.objects;
+create policy "avatars_delete" on storage.objects
+  for delete to authenticated
+  using (bucket_id = 'avatars' and (storage.foldername(name))[1] = auth.uid()::text);
+
+-- ---------- Nomes dos times no formato "Outros" ----------------------
+-- (no banco o formato continua se chamando 'rito'; no site aparece como "Outros")
+-- team_names[i] = nome do time i; vazio/nulo = "Time i"
+alter table public.events add column if not exists team_names text[];
+
+-- Renomeia um time e leva junto quem já está nele, numa única transação
+create or replace function public.rename_team(p_event bigint, p_index integer, p_name text) returns void
+language plpgsql security invoker set search_path = public as $$
+declare
+  ev       public.events;
+  names    text[];
+  old_name text;
+  new_name text := nullif(btrim(coalesce(p_name, '')), '');
+begin
+  if not public.is_officer() then
+    raise exception 'Sem permissão para renomear times';
+  end if;
+  select * into ev from public.events where id = p_event for update;
+  if ev.id is null then raise exception 'Evento não encontrado'; end if;
+  if ev.team_format is distinct from 'rito' then
+    raise exception 'Só é possível renomear times no formato Outros';
+  end if;
+  if p_index < 1 or p_index > ev.team_count then raise exception 'Time inválido'; end if;
+  if char_length(new_name) > 30 then raise exception 'O nome do time pode ter até 30 caracteres'; end if;
+
+  -- Lista sempre com 10 posições (evita índices "pulados" no array)
+  names := array(select ev.team_names[i] from generate_series(1, 10) i);
+  old_name := coalesce(nullif(btrim(names[p_index]), ''), 'Time ' || p_index);
+  if exists (select 1 from generate_series(1, ev.team_count) i
+              where i <> p_index
+                and lower(coalesce(nullif(btrim(names[i]), ''), 'Time ' || i))
+                  = lower(coalesce(new_name, 'Time ' || p_index))) then
+    raise exception 'Já existe um time com esse nome';
+  end if;
+
+  names[p_index] := new_name;
+  update public.events set team_names = names where id = p_event;
+  update public.team_slots set team = coalesce(new_name, 'Time ' || p_index)
+   where event_id = p_event and team = old_name;
+end $$;
+
+revoke execute on function public.rename_team(bigint, integer, text) from public, anon;
+grant  execute on function public.rename_team(bigint, integer, text) to authenticated;
+
+-- ---------- Novo tipo de evento --------------------------------------
+insert into public.event_types (name, sort_order) values ('Torre Amaldiçoada', 40)
+on conflict (name) do nothing;

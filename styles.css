@@ -688,3 +688,20 @@ h1 { background: linear-gradient(180deg, #fff1da, #e3b878); -webkit-background-c
 .util-body { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
 .util-body b { font-family: "Cinzel", serif; font-size: 1.05rem; color: var(--gold); }
 .util-host { font-size: .78rem; color: var(--ember); margin-top: 4px; }
+
+/* ---------- Botão "Detalhar evento" nos cards ---------- */
+.event .ev-foot { margin-top: 8px; }
+.event .ev-foot .btn { text-decoration: none; }
+
+/* ---------- Renomear time (formato Outros) ---------- */
+.team-rename { background: none; border: 0; padding: 0 2px; margin-left: 2px; cursor: pointer; font-size: .8rem; opacity: .65; line-height: 1; }
+.team-rename:hover, .team-rename:focus-visible { opacity: 1; }
+
+/* ---------- Evento já finalizado (revisão de times) ---------- */
+.finished-banner { margin: 0 0 12px; }
+
+/* ---------- Foto de perfil ---------- */
+.pf-photo { align-items: center; gap: 14px; flex-wrap: nowrap; }
+.pf-photo label.btn { cursor: pointer; }
+.pf-photo .btn.disabled { opacity: .5; pointer-events: none; }
+@media (max-width: 480px) { .pf-photo { flex-wrap: wrap; } }

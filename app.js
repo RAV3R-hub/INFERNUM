@@ -34,7 +34,8 @@
   const TEAM_SIZE = 8;
   const RITE_MAX = 10;
   const WAR_GROUPS = ['Exaltação', 'Eminência', 'Renome', 'Orgulho'];
-  const FORMAT_LABEL = { guerra: 'Guerra', rito: 'Rito' };
+  const FORMAT_LABEL = { guerra: 'Guerra', rito: 'Outros' };
+  const TEAM_NAME_MAX = 30;
 
   // Sugestões no campo "título" — o oficial pode digitar qualquer outro nome.
   const EVENT_SUGGESTIONS = [
@@ -179,6 +180,24 @@
         ok(await q);
       },
       async saveTeams(eventId, slots) { ok(await sb.rpc('save_teams', { p_event: eventId, p_slots: slots })); },
+      async renameTeam(eventId, index, name) { ok(await sb.rpc('rename_team', { p_event: eventId, p_index: index + 1, p_name: name })); },
+      // Foto de perfil: blob = nova foto; null + hidden = sem foto; null sem hidden = volta a do Discord
+      async setAvatar(blob, hidden = false) {
+        const uid = state.user.id;
+        const old = state.me?.custom_avatar_url;
+        let url = null;
+        if (blob) {
+          const path = `${uid}/${crypto.randomUUID()}.${blob.type === 'image/webp' ? 'webp' : 'jpg'}`;
+          const up = await sb.storage.from('avatars').upload(path, blob, { contentType: blob.type, upsert: false });
+          if (up.error) throw up.error;
+          url = sb.storage.from('avatars').getPublicUrl(path).data.publicUrl;
+        }
+        const { error } = await sb.from('profiles').update({ custom_avatar_url: url, avatar_hidden: !blob && hidden }).eq('id', uid);
+        if (error) { if (url) await sb.storage.from('avatars').remove([url.split('/avatars/').pop()]); throw error; }
+        const oldPath = old?.includes('/avatars/') ? old.split('/avatars/').pop() : null;
+        if (oldPath) await sb.storage.from('avatars').remove([oldPath]);
+        return url;
+      },
       async saveAttendance(eventId, rows) {
         ok(await sb.from('attendance').upsert(rows.map((r) => ({ event_id: eventId, user_id: r.user_id, present: r.present }))));
       },
@@ -313,11 +332,19 @@
       });
     }
 
+    // Um evento passado com times no formato "Outros", com um time renomeado e você escalado
+    Object.assign(db.events.find((e) => e.id === 12), { title: 'Torre Amaldiçoada', team_format: 'rito', team_count: 3, team_names: ['Revenge', null, null] });
+    if (!db.rsvps.some((r) => r.event_id === 12 && r.user_id === 'u0')) answer(12, 'u0', true);
+    Object.assign(db.rsvps.find((r) => r.event_id === 12 && r.user_id === 'u0'), { going: true, ...pick(profile('u0'), BUILD_KEYS) });
+    db.rsvps.filter((r) => r.event_id === 12 && r.going).sort((a, b) => (a.user_id === 'u0' ? -1 : b.user_id === 'u0' ? 1 : 0)).slice(0, 20)
+      .forEach((r, i) => db.slots.push({ event_id: 12, user_id: r.user_id, team: ['Revenge', 'Time 2', 'Time 3'][Math.floor(i / 8)] }));
+
     // Tipos de evento (no site real vêm da tabela event_types)
     db.types = [
       { id: 1, name: 'Guerra das Sombras', sort_order: 10, active: true },
       { id: 2, name: 'Vigília', sort_order: 20, active: true },
       { id: 3, name: 'Rito do Exílio', sort_order: 30, active: true },
+      { id: 5, name: 'Torre Amaldiçoada', sort_order: 40, active: true },
       { id: 4, name: 'Outros', sort_order: 999, active: true },
     ];
     db.events.forEach((e) => { e.type_id = guessTypeId(e.title, db.types); });
@@ -525,6 +552,27 @@
       },
       async unassign(eventId, userId) { dropSlot(eventId, userId); },
       async removeTeams(eventId, teams) { db.slots = db.slots.filter((s) => !(s.event_id === eventId && (!teams || teams.includes(s.team)))); },
+      // Mesmas regras da função rename_team do banco
+      async renameTeam(eventId, index, name) {
+        const e = db.events.find((x) => x.id === eventId);
+        if (e.team_format !== 'rito') throw new Error('Só é possível renomear times no formato Outros');
+        const clean = String(name || '').trim();
+        if (clean.length > TEAM_NAME_MAX) throw new Error(`O nome do time pode ter até ${TEAM_NAME_MAX} caracteres`);
+        const oldName = customTeamName(e, index);
+        const names = Array.from({ length: RITE_MAX }, (_, i) => e.team_names?.[i] ?? null);
+        names[index] = clean || null;
+        const next = { ...e, team_names: names };
+        const newName = customTeamName(next, index);
+        if (teamNames(next).some((t, i) => i !== index && norm(t) === norm(newName))) throw new Error('Já existe um time com esse nome');
+        e.team_names = names;
+        db.slots.forEach((s) => { if (s.event_id === eventId && s.team === oldName) s.team = newName; });
+      },
+      async setAvatar(blob, hidden = false) {
+        const p = profile(state.user.id);
+        p.custom_avatar_url = blob ? URL.createObjectURL(blob) : null;
+        p.avatar_hidden = !blob && hidden;
+        return p.custom_avatar_url;
+      },
       async saveTeams(eventId, slots) {
         const count = {};
         slots.forEach((s) => {
@@ -584,7 +632,9 @@
   function buildFor(rsvp, profile) { return hasBuild(rsvp) ? pick(rsvp, BUILD_KEYS) : pick(profile, BUILD_KEYS); }
 
   function avatar(p, cls = '') {
-    if (p?.avatar_url) return `<img class="avatar ${cls}" src="${esc(p.avatar_url)}" alt="" loading="lazy">`;
+    // Foto enviada pelo site > foto do Discord; "avatar_hidden" = o membro removeu a foto
+    const url = p?.avatar_hidden ? null : (p?.custom_avatar_url || p?.avatar_url);
+    if (url) return `<img class="avatar ${cls}" src="${esc(url)}" alt="" loading="lazy">`;
     return `<span class="avatar ${cls}" aria-hidden="true">${esc(displayName(p).charAt(0).toUpperCase())}</span>`;
   }
   function classTag(key) {
@@ -622,9 +672,11 @@
   const typeName = (id) => state.types.find((t) => t.id === id)?.name || '';
   const hasStarted = (ev) => Date.parse(ev.starts_at) <= Date.now();
 
+  // Formato "Outros": o oficial pode renomear cada time (ex.: "Time 1" → "Revenge"). Vazio = nome padrão.
+  const customTeamName = (ev, i) => (ev.team_names?.[i] || '').trim() || `Time ${i + 1}`;
   function teamNames(ev) {
     if (ev.team_format === 'guerra') return WAR_GROUPS.flatMap((g) => [1, 2, 3].map((n) => `${g} ${n}`));
-    if (ev.team_format === 'rito') return Array.from({ length: ev.team_count || RITE_MAX }, (_, i) => `Time ${i + 1}`);
+    if (ev.team_format === 'rito') return Array.from({ length: ev.team_count || RITE_MAX }, (_, i) => customTeamName(ev, i));
     return [];
   }
 
@@ -916,6 +968,7 @@
         ${ev.description ? `<div class="desc">${esc(ev.description)}</div>` : ''}
         ${isOfficer() ? `<div class="counts"><span class="c-yes">✔ ${c.yes} vão</span><span class="c-no">✖ ${c.no} não vão</span><span class="muted">${c.pending} sem resposta</span></div>
         <div class="bar"><span class="y" style="width:${pct(c.yes)}%"></span><span class="n" style="width:${pct(c.no)}%"></span></div>` : ''}
+        <div class="ev-foot"><a class="btn small ghost" href="#/evento/${ev.id}">🔎 Detalhar evento</a></div>
       </div>
       ${isOpen(ev) ? rsvpButtons(ev) : ''}
     </div>`;
@@ -1102,12 +1155,12 @@
     </div></div>`;
   }
 
-  function teamCard(name, people, { editable = false, sel = null, showFoot = true, bare = false } = {}) {
+  function teamCard(name, people, { editable = false, sel = null, showFoot = true, bare = false, renameIndex = null } = {}) {
     const hide = bare || aggMode() === 'hide';
     const mineHere = people.some((p) => p.id === actingId());
     const empties = editable ? Array.from({ length: TEAM_SIZE - people.length }, () => '<div class="slot-empty">vazio</div>').join('') : '';
     return `<div class="team${mineHere ? ' mine' : ''}${people.length >= TEAM_SIZE ? ' full' : ''}${editable && sel ? ' target' : ''}" data-team="${esc(name)}">
-      <div class="team-head"><strong>${esc(name)}</strong><span class="muted small">${people.some((p) => p.discord) ? `<span class="dc-count" title="Integrantes no Discord">🎧 ${people.filter((p) => p.discord).length}</span> · ` : ''}${people.length}/${TEAM_SIZE}</span></div>
+      <div class="team-head"><strong>${esc(name)}${renameIndex !== null ? ` <button type="button" class="team-rename" data-rename="${renameIndex}" title="Renomear este time" aria-label="Renomear ${esc(name)}">✏️</button>` : ''}</strong><span class="muted small">${people.some((p) => p.discord) ? `<span class="dc-count" title="Integrantes no Discord">🎧 ${people.filter((p) => p.discord).length}</span> · ` : ''}${people.length}/${TEAM_SIZE}</span></div>
       <div class="team-slots">${people.map((p) => chip(p, { draggable: editable, removable: editable, selected: sel === p.id, compact: true, bare: hide })).join('')}${empties}</div>
       ${people.length && showFoot && !hide ? teamFoot(people) : ''}
     </div>`;
@@ -1120,8 +1173,8 @@
         ${[1, 2, 3].map((n) => teamCard(`${g} ${n}`, byTeam(`${g} ${n}`), opts)).join('')}</div></div>`).join('');
     }
     const names = teamNames(ev);
-    const shown = opts.editable ? names : names.filter((t) => byTeam(t).length);
-    return `<div class="teams-grid">${shown.map((t) => teamCard(t, byTeam(t), opts)).join('')}</div>`;
+    const shown = names.map((t, i) => [t, i]).filter(([t]) => opts.editable || byTeam(t).length);
+    return `<div class="teams-grid">${shown.map(([t, i]) => teamCard(t, byTeam(t), { ...opts, renameIndex: opts.renamable ? i : null })).join('')}</div>`;
   }
 
   function teamsText(ev, people, slots) {
@@ -1194,8 +1247,9 @@
         </div>`).join('')}
       </div>` : '';
 
+    const finished = !isOpen(ev);
     main.innerHTML = `
-      <p><a href="#/" class="small">← Voltar</a></p>
+      <p><a href="${finished ? '#/passados' : '#/'}" class="small">← Voltar${finished ? ' aos eventos passados' : ''}</a></p>
       <div class="card stack">
         <div class="row">
           <div class="spacer">
@@ -1210,7 +1264,7 @@
           <button class="btn small ghost" id="btn-copy">🔗 Copiar link</button>
           ${isOfficer() ? `<button class="btn small ghost" id="btn-copy-list">📋 Copiar lista</button>
             <span class="spacer"></span>
-            <a class="btn small primary" href="#/evento/${ev.id}/times">⚔ Montar times</a>
+            <a class="btn small primary" id="btn-teams" href="#/evento/${ev.id}/times">⚔ ${finished ? 'Revisar times' : 'Montar times'}</a>
             <button class="btn small" id="btn-edit">Editar</button>
             <button class="btn small" id="btn-dup">Repetir na próxima semana</button>
             <button class="btn small danger" id="btn-del">Apagar</button>` : ''}
@@ -1270,10 +1324,18 @@
         copy(text, 'Lista copiada — cole no Discord');
       });
       $('#btn-edit').addEventListener('click', () => openEventForm(ev));
+      // Evento já finalizado: avisa antes de abrir a revisão dos times
+      $('#btn-teams').addEventListener('click', async (e) => {
+        if (!finished) return;
+        e.preventDefault();
+        if (await confirmDialog('Atenção: este evento já foi finalizado. Você está revisando os times de um evento encerrado; as mudanças alteram o histórico de quem participou de cada time. Continuar?', 'Revisar times')) {
+          location.hash = `#/evento/${ev.id}/times`;
+        }
+      });
       $('#btn-dup').addEventListener('click', async () => {
         const d = new Date(ev.starts_at); d.setDate(d.getDate() + 7);
         try {
-          await api.createEvents([{ title: ev.title, description: ev.description || null, type_id: ev.type_id ?? null, rsvp_close_minutes: ev.rsvp_close_minutes ?? null, starts_at: d.toISOString(), team_format: ev.team_format, team_count: ev.team_count }]);
+          await api.createEvents([{ title: ev.title, description: ev.description || null, type_id: ev.type_id ?? null, rsvp_close_minutes: ev.rsvp_close_minutes ?? null, starts_at: d.toISOString(), team_format: ev.team_format, team_count: ev.team_count, ...(ev.team_names?.some(Boolean) ? { team_names: ev.team_names } : {}) }]);
           toast(`Criado para ${d.toLocaleDateString('pt-BR')}`);
         } catch (e) { fail(e); }
       });
@@ -1536,18 +1598,20 @@
     const assigned = T.people.filter((p) => T.slots.has(p.id)).length;
     const pool = sortedPool();
     const capacity = teamNames(ev).length * TEAM_SIZE;
+    const finished = !isOpen(ev);
 
     const head = `
       <p><a href="#/evento/${ev.id}" class="small">← Voltar ao evento</a></p>
+      ${finished ? '<div class="lock-banner warn finished-banner">⚠ <b>Evento já finalizado.</b> Você está revisando os times de um evento encerrado. O que for salvo aqui altera o histórico de quem participou de cada time.</div>' : ''}
       <div class="page-head">
         <div style="flex:1;min-width:200px">
-          <h1 style="margin:0">Times · ${esc(ev.title)}</h1>
+          <h1 style="margin:0">${finished ? 'Revisar times' : 'Times'} · ${esc(ev.title)}</h1>
           <div class="muted small">${esc(fmtDay(ev.starts_at))} · ${fmtTime(ev.starts_at)} · ${T.people.length} confirmados · ${assigned} em times${capacity ? ` · ${capacity} vagas` : ''}</div>
         </div>
         <div class="row">
           <div class="seg" role="group" aria-label="Formato">
             <button class="${ev.team_format === 'guerra' ? 'on' : ''}" data-format="guerra">Guerra</button>
-            <button class="${ev.team_format === 'rito' ? 'on' : ''}" data-format="rito">Rito</button>
+            <button class="${ev.team_format === 'rito' ? 'on' : ''}" data-format="rito">Outros</button>
           </div>
           ${ev.team_format === 'rito' ? `<label class="inline-label">Times
             <select class="inline" id="rite-count">${Array.from({ length: RITE_MAX }, (_, i) => i + 1).map((n) => `<option ${n === (ev.team_count || RITE_MAX) ? 'selected' : ''}>${n}</option>`).join('')}</select></label>` : ''}
@@ -1572,14 +1636,14 @@
         <p>Escolha o formato dos times para este evento:</p>
         <div class="row" style="justify-content:center;gap:16px;margin-top:12px">
           <button class="btn primary big" data-format="guerra">Guerra<small>12 times · Exaltação, Eminência, Renome, Orgulho</small></button>
-          <button class="btn primary big" data-format="rito">Rito<small>até 10 times de 8</small></button>
+          <button class="btn primary big" data-format="rito">Outros<small>até 10 times de 8 · nomes editáveis</small></button>
         </div></div>`;
       bindTeamControls();
       return;
     }
 
     main.innerHTML = `${head}
-      <p class="muted small hint">Clique em um membro e depois no time (ou arraste). Para tirar do time, clique no × ou arraste de volta para a lista.</p>
+      <p class="muted small hint">Clique em um membro e depois no time (ou arraste). Para tirar do time, clique no × ou arraste de volta para a lista.${ev.team_format === 'rito' ? ' Para renomear um time (ex.: “Revenge”), clique no ✏️ ao lado do nome.' : ''}</p>
       <div class="tb">
         <aside class="pool card${T.sel && T.slots.has(T.sel) ? ' target' : ''}" id="pool">
           <div class="pool-head">
@@ -1602,7 +1666,7 @@
           </div>
           ${classSummary()}
         </aside>
-        <section class="teams-area">${teamsHtml(ev, T.people, T.slots, { editable: true, sel: T.sel })}</section>
+        <section class="teams-area">${teamsHtml(ev, T.people, T.slots, { editable: true, sel: T.sel, renamable: ev.team_format === 'rito' })}</section>
       </div>`;
     // Destaca quem foi movido e ainda não foi salvo
     main.querySelectorAll('.chip[data-uid]').forEach((c) => {
@@ -1633,7 +1697,7 @@
     },
     equilibrado: {
       label: 'Equilibrado',
-      desc: 'Distribui os confirmados entre os times do Rito, deixando a Ressonância dos times o mais parecida possível.',
+      desc: 'Distribui os confirmados entre os times, deixando a Ressonância dos times o mais parecida possível.',
     },
   };
 
@@ -1783,6 +1847,43 @@
     renderTeams();
   }
 
+  // Formato "Outros": renomear um time (vale na hora; quem está no time continua nele)
+  function openRenameTeam(index) {
+    if (teamsDirty()) { toast('Salve ou descarte as alterações antes de renomear um time', true); return; }
+    const current = customTeamName(T.ev, index);
+    openDialog(`
+      <form id="rn-form" class="stack">
+        <h2>Renomear time</h2>
+        <div class="field">
+          <label for="rn-name">Nome do time</label>
+          <input id="rn-name" maxlength="${TEAM_NAME_MAX}" value="${esc(T.ev.team_names?.[index] || '')}" placeholder="Time ${index + 1}" autocomplete="off">
+          <div class="muted small field-hint">Ex.: o nome de um clã, como “Revenge”. Deixe vazio para voltar a “Time ${index + 1}”. Até ${TEAM_NAME_MAX} caracteres.</div>
+        </div>
+        <div class="row end">
+          <button type="button" class="btn ghost" data-close>Cancelar</button>
+          <button type="submit" class="btn primary">Salvar nome</button>
+        </div>
+      </form>`, (d) => {
+      const input = $('#rn-name', d);
+      input.focus(); input.select();
+      $('#rn-form', d).addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const name = input.value.trim();
+        const next = customTeamName({ team_names: Object.assign([], T.ev.team_names, { [index]: name || null }) }, index);
+        if (next === current) { dlg.close(); return; }
+        if (teamNames(T.ev).some((t, i) => i !== index && norm(t) === norm(next))) { toast('Já existe um time com esse nome', true); return; }
+        const submit = $('button[type=submit]', d);
+        submit.disabled = true;
+        try {
+          await api.renameTeam(T.ev.id, index, name);
+          dlg.close();
+          toast(`Time renomeado para “${next}”`);
+          await viewTeams(T.ev.id);
+        } catch (err) { fail(err); submit.disabled = false; }
+      });
+    });
+  }
+
   async function changeFormat(format, count) {
     const ev = T.ev;
     const newCount = count ?? ev.team_count ?? RITE_MAX;
@@ -1802,7 +1903,7 @@
     }
     try {
       if (drop === null) { if (T.slots.size) await api.removeTeams(ev.id, null); } else if (drop.length) await api.removeTeams(ev.id, drop);
-      await api.updateEvent(ev.id, { team_format: format, team_count: newCount });
+      await api.updateEvent(ev.id, { team_format: format, team_count: newCount, ...(format !== ev.team_format && ev.team_names ? { team_names: null } : {}) });
       await viewTeams(ev.id);
     } catch (e) { fail(e); }
   }
@@ -1819,6 +1920,7 @@
       T.slots.clear(); T.sel = null; renderTeams();
     });
     $('#btn-save')?.addEventListener('click', saveTeams);
+    main.querySelectorAll('[data-rename]').forEach((b) => b.addEventListener('click', (e) => { e.stopPropagation(); openRenameTeam(Number(b.dataset.rename)); }));
     $('#btn-suggest')?.addEventListener('click', openSuggestDialog);
     $('#btn-lock')?.addEventListener('click', async () => {
       if (teamsDirty()) { toast('Salve ou descarte as alterações antes de travar/destravar os times', true); return; }
@@ -2819,7 +2921,7 @@
             <select id="f-weeks">${[1, 2, 3, 4, 6, 8, 12].map((n) => `<option value="${n}">${n === 1 ? 'Só esta vez' : `${n} semanas`}</option>`).join('')}</select></div>`}
         </div>
         ${editing ? '' : `<div class="field"><label for="f-format">Formato dos times <span class="muted small">(pode escolher depois)</span></label>
-          <select id="f-format"><option value="">Sem times</option><option value="guerra">Guerra (12 times)</option><option value="rito">Rito (até 10 times)</option></select></div>`}
+          <select id="f-format"><option value="">Sem times</option><option value="guerra">Guerra (12 times)</option><option value="rito">Outros (até 10 times)</option></select></div>`}
         <div class="field">
           <label for="f-close">Prazo para responder</label>
           <select id="f-close">
@@ -2888,6 +2990,29 @@
     });
   }
 
+  // Recorta a imagem em quadrado (centro) e reduz para 256×256 antes de enviar
+  async function squareAvatar(file, size = 256) {
+    const img = await new Promise((resolve, reject) => {
+      const url = URL.createObjectURL(file);
+      const i = new Image();
+      i.onload = () => { URL.revokeObjectURL(url); resolve(i); };
+      i.onerror = () => { URL.revokeObjectURL(url); reject(new Error('imagem inválida')); };
+      i.src = url;
+    });
+    const side = Math.min(img.naturalWidth, img.naturalHeight);
+    if (!side) throw new Error('imagem inválida');
+    const canvas = document.createElement('canvas');
+    canvas.width = canvas.height = size;
+    const ctx = canvas.getContext('2d');
+    ctx.imageSmoothingQuality = 'high';
+    ctx.drawImage(img, (img.naturalWidth - side) / 2, (img.naturalHeight - side) / 2, side, side, 0, 0, size, size);
+    const toBlob = (type, q) => new Promise((r) => canvas.toBlob(r, type, q));
+    let blob = await toBlob('image/webp', 0.88);
+    if (!blob || blob.type !== 'image/webp') blob = await toBlob('image/jpeg', 0.9);
+    if (!blob) throw new Error('falha ao converter');
+    return blob;
+  }
+
   async function openProfile() {
     const me = state.me;
     let phone = '';
@@ -2895,7 +3020,19 @@
     openDialog(`
       <form id="pf" class="stack">
         <h2>Meu perfil</h2>
-        <div class="row">${avatar(me, 'lg')}<div><strong>${esc(me.discord_name)}</strong><div class="muted small">${ROLE_LABEL[me.role]}</div></div></div>
+        <div class="row pf-photo">
+          <span id="pf-avatar">${avatar(me, 'xl')}</span>
+          <div class="stack" style="gap:6px">
+            <div><strong>${esc(me.discord_name)}</strong><div class="muted small">${ROLE_LABEL[me.role]}</div></div>
+            <div class="row" style="gap:6px">
+              <label class="btn small" for="pf-file">📷 ${me.custom_avatar_url ? 'Trocar foto' : 'Enviar foto'}</label>
+              <input id="pf-file" type="file" accept="image/png,image/jpeg,image/webp,image/gif" hidden>
+              ${!me.avatar_hidden && (me.custom_avatar_url || me.avatar_url) ? '<button type="button" class="btn small ghost danger" id="pf-remove">Remover foto</button>' : ''}
+              ${(me.custom_avatar_url || me.avatar_hidden) && me.avatar_url ? '<button type="button" class="btn small ghost" id="pf-discord">Usar foto do Discord</button>' : ''}
+            </div>
+            <div class="muted small">Use uma foto do seu computador ou celular. Ela é recortada em quadrado.</div>
+          </div>
+        </div>
         <div class="grid2">
           <div class="field">
             <label for="f-game">Nome do personagem</label>
@@ -2913,6 +3050,37 @@
           <button type="submit" class="btn primary">Salvar</button>
         </div>
       </form>`, (d) => {
+      // Foto: salva na hora (independente do botão Salvar do formulário)
+      const applyAvatar = async (blob, hidden, msg) => {
+        d.querySelectorAll('.pf-photo .btn').forEach((b) => { b.disabled = true; b.classList.add('disabled'); });
+        try {
+          const url = await api.setAvatar(blob, hidden);
+          Object.assign(state.me, { custom_avatar_url: url, avatar_hidden: !blob && hidden });
+          const m = memberById(state.me.id);
+          if (m) Object.assign(m, { custom_avatar_url: url, avatar_hidden: !blob && hidden });
+          toast(msg);
+          renderHeader(currentRouteKey());
+          openProfile();
+        } catch (err) {
+          fail(err);
+          d.querySelectorAll('.pf-photo .btn').forEach((b) => { b.disabled = false; b.classList.remove('disabled'); });
+        }
+      };
+      $('#pf-file', d).addEventListener('change', async (e) => {
+        const file = e.target.files?.[0];
+        e.target.value = '';
+        if (!file) return;
+        if (!file.type.startsWith('image/')) { toast('Escolha um arquivo de imagem (JPG, PNG ou WebP)', true); return; }
+        if (file.size > 15 * 1024 * 1024) { toast('Imagem muito grande (máximo 15 MB)', true); return; }
+        let blob;
+        try { blob = await squareAvatar(file); } catch { toast('Não foi possível ler esta imagem. Tente uma foto JPG ou PNG.', true); return; }
+        await applyAvatar(blob, false, 'Foto de perfil atualizada');
+      });
+      $('#pf-remove', d)?.addEventListener('click', async () => {
+        if (!(await confirmDialog('Remover sua foto de perfil? No lugar dela vai aparecer a inicial do seu nome.', 'Remover foto'))) { openProfile(); return; }
+        await applyAvatar(null, true, 'Foto removida');
+      });
+      $('#pf-discord', d)?.addEventListener('click', () => applyAvatar(null, false, 'Voltou a foto do Discord'));
       $('#pf', d).addEventListener('submit', async (e) => {
         e.preventDefault();
         const submit = $('button[type=submit]', d);
@@ -2931,7 +3099,7 @@
   //  Navegação
   // =====================================================================
 
-  async function route() {
+  function parseRoute() {
     const h = location.hash.replace(/^#/, '') || '/';
     const ev = h.match(/^\/evento\/(\d+)$/);
     const tm = h.match(/^\/evento\/(\d+)\/times$/);
@@ -2939,6 +3107,12 @@
     const key = h === '/passados' ? 'past' : h === '/frequencia' ? 'freq' : h === '/news' ? 'news' : h === '/utils' ? 'utils'
       : h === '/perfil' ? 'profile' : h === '/membros' ? (isOfficer() ? 'members' : 'profile') : mp ? 'members'
       : tm ? 'teams' : ev ? 'event' : 'upcoming';
+    return { ev, tm, mp, key };
+  }
+  const currentRouteKey = () => parseRoute().key;
+
+  async function route() {
+    const { ev, tm, mp, key } = parseRoute();
     renderHeader(key);
     if (!state.user) return viewLogin();
     if (!isMember()) return state.me?.role === 'former' ? viewFormer() : viewPending();
