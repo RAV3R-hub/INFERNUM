@@ -1250,8 +1250,7 @@
       if (isOfficer()) links.push(['#/membros', 'Membros', 'members']);
       if (can('freq_view')) links.push(['#/frequencia', 'Frequência', 'freq']);
       links.push(['#/perfil', 'Meu perfil', 'profile'], ['#/utils', 'Utils', 'utils']);
-      if (isLeader()) links.push(['#/config', 'Configurações', 'config']);
-      else if (isOfficer()) links.push(['#/solicitacoes', 'Solicitações', 'requests']);
+      if (!isLeader() && isOfficer()) links.push(['#/solicitacoes', 'Solicitações', 'requests']);
       // Os contadores ficam no sininho (ao lado da foto), não no menu
       nav.innerHTML = links.map(([href, label, key]) => `<a href="${href}" class="${currentKey === key ? 'active' : ''}">${label}</a>`).join('');
     } else nav.innerHTML = '';
@@ -1264,6 +1263,7 @@
           <select id="acting-select" class="inline">${accounts.map((a) => `<option value="${esc(a.id)}" ${a.id === actingId() ? 'selected' : ''}>${esc(displayName(a))}${a.id === state.user.id ? ' (você)' : ' 🧑‍✈️'}</option>`).join('')}</select>
         </label>` : ''}
         ${isMember() ? '<div class="bell-wrap" id="bell-wrap"></div>' : ''}
+        ${isLeader() ? `<a class="gear${currentKey === 'config' ? ' active' : ''}" href="#/config" title="Configurações" aria-label="Configurações"><span aria-hidden="true">⚙️</span></a>` : ''}
         <button class="who" id="btn-profile" title="Meu perfil">${avatar(state.me)}<span class="label">${esc(displayName(state.me))}</span></button>
         <button class="btn ghost small" id="btn-logout">Sair</button>`;
       $('#acting-select')?.addEventListener('change', (e) => {

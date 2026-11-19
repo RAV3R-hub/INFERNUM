@@ -876,3 +876,8 @@ body.has-fab main { padding-bottom: 90px; }
 @media (max-width: 600px) {
   .bell-pop { position: fixed; left: 12px; right: 12px; top: 60px; width: auto; }
 }
+
+/* ---------- Engrenagem: Configurações do líder ---------- */
+.gear { display: grid; place-items: center; width: 38px; height: 38px; border-radius: 50%; border: 1px solid var(--border); background: var(--panel); font-size: 1.1rem; text-decoration: none; }
+.gear:hover { background: var(--panel-2); border-color: #5a4236; }
+.gear.active { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
