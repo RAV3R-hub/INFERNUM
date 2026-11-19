@@ -841,3 +841,18 @@ h1 { background: linear-gradient(180deg, #fff1da, #e3b878); -webkit-background-c
 .tk-mini { display: flex; align-items: center; gap: 10px; padding: 8px 0; border-top: 1px solid rgba(255, 255, 255, .06); color: var(--text); text-decoration: none; }
 .tk-mini:first-child { border-top: 0; }
 .tk-mini:hover b { color: var(--gold); }
+
+/* ---------- Botão flutuante: Central de Atendimento ---------- */
+.help-fab { position: fixed; right: 20px; bottom: 20px; z-index: 40; display: inline-flex; align-items: center; gap: 0; height: 56px; min-width: 56px; padding: 0 16px;
+  border-radius: 999px; background: var(--accent); color: #fff; text-decoration: none; font-weight: 600; box-shadow: 0 6px 20px rgba(0, 0, 0, .45), 0 0 0 1px rgba(255, 255, 255, .08);
+  transition: transform .15s ease, box-shadow .15s ease; }
+.help-fab[hidden] { display: none; }
+.help-fab:hover, .help-fab:focus-visible { transform: translateY(-2px); box-shadow: 0 10px 26px rgba(0, 0, 0, .55), 0 0 0 2px var(--gold); }
+.help-fab.active { box-shadow: 0 6px 20px rgba(0, 0, 0, .45), 0 0 0 2px var(--gold); }
+.help-fab-icon { font-size: 1.5rem; line-height: 1; }
+.help-fab-label { max-width: 0; overflow: hidden; white-space: nowrap; transition: max-width .2s ease, margin .2s ease; }
+.help-fab:hover .help-fab-label, .help-fab:focus-visible .help-fab-label { max-width: 220px; margin-left: 8px; }
+body.has-fab main { padding-bottom: 90px; }
+@media (max-width: 600px) {
+  .help-fab { right: 14px; bottom: 14px; height: 52px; min-width: 52px; padding: 0 14px; }
+}

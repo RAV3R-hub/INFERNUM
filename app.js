@@ -904,7 +904,7 @@
       { key: 'recruit_delete', label: 'Apagar recrutamentos', desc: 'Apagar recrutamentos de outros membros', approval: true },
     ] }] : []),
     ...(TICKETS_ON ? [{ group: 'Tickets', items: [
-      { key: 'ticket_view', label: 'Ver tickets', desc: 'Se bloqueado, a aba Atendimento some para os oficiais' },
+      { key: 'ticket_view', label: 'Ver tickets', desc: 'Se bloqueado, o oficial só vê os próprios tickets na Central de Atendimento' },
       { key: 'ticket_reply', label: 'Responder tickets', desc: 'Responder, escrever notas internas e assumir tickets' },
       { key: 'ticket_resolve', label: 'Resolver tickets', desc: 'Mudar o status (Em andamento, Resolvido ou reabrir)' },
       { key: 'ticket_reports', label: 'Ver denúncias', desc: 'Se bloqueado, os tickets de Reclamação / Denúncia ficam só com o líder' },
@@ -1216,15 +1216,29 @@
     }
     main.classList.toggle('wide', currentKey === 'teams' || currentKey === 'freq');
 
+    // Botão flutuante da Central de Atendimento (membros: os meus tickets; liderança: aba Atendimento)
+    let fab = $('#help-fab');
+    if (!fab) {
+      fab = document.createElement('a');
+      fab.id = 'help-fab';
+      fab.className = 'help-fab';
+      fab.innerHTML = '<span class="help-fab-icon" aria-hidden="true">💬</span><span class="help-fab-label">Central de Atendimento</span>';
+      document.body.appendChild(fab);
+    }
+    fab.hidden = !(TICKETS_ON && isMember()) || currentKey === 'teams';
+    fab.href = supportOn() ? '#/atendimento' : '#/tickets';
+    fab.title = supportOn() ? 'Central de Atendimento: tickets dos membros' : 'Central de Atendimento: fale com a liderança';
+    fab.setAttribute('aria-label', 'Central de Atendimento');
+    fab.classList.toggle('active', ['tickets', 'support'].includes(currentKey));
+    document.body.classList.toggle('has-fab', !fab.hidden);
+
     const nav = $('#nav');
     if (isMember()) {
       const links = [['#/', 'Próximos', 'upcoming'], ['#/passados', 'Passados', 'past'], ['#/news', 'Malah News', 'news']];
       if (RECRUIT_ON) links.push(['#/recrutamentos', 'Recrutamentos', 'recruits']);
-      if (TICKETS_ON && !supportOn()) links.push(['#/tickets', 'Tickets', 'tickets']);
       if (isOfficer()) links.push(['#/membros', 'Membros', 'members']);
       if (can('freq_view')) links.push(['#/frequencia', 'Frequência', 'freq']);
       links.push(['#/perfil', 'Meu perfil', 'profile'], ['#/utils', 'Utils', 'utils']);
-      if (TICKETS_ON && supportOn()) links.push(['#/atendimento', 'Atendimento', 'support']);
       if (isLeader()) links.push(['#/config', 'Configurações', 'config']);
       else if (isOfficer()) links.push(['#/solicitacoes', 'Solicitações', 'requests']);
       const dot = (key) => (key === 'news' && hasUnreadNews() ? '<span class="dot-new" title="Edição nova"></span>'
@@ -3043,7 +3057,7 @@
     const open = mine.filter((t) => t.status !== 'resolved');
     const done = mine.filter((t) => t.status === 'resolved');
     main.innerHTML = `
-      <div class="page-head"><h1>Tickets</h1><button class="btn primary" id="btn-new-tk">+ Novo ticket</button></div>
+      <div class="page-head"><h1>Central de Atendimento</h1><button class="btn primary" id="btn-new-tk">+ Novo ticket</button></div>
       <p class="muted small">Fale com a liderança do clã: sugestões, melhorias, dúvidas, problemas no site, reclamações ou denúncias. O líder e os oficiais respondem aqui mesmo, e você pode abrir o ticket de forma anônima.</p>
       <div class="section-head"><h2>Em aberto</h2></div>
       ${open.length ? open.map((t) => ticketRowHtml(t, false)).join('') : '<div class="card empty">Você não tem tickets em aberto.</div>'}
@@ -3086,7 +3100,7 @@
     const done = list.filter((t) => t.status === 'resolved');
     const rows = (arr) => arr.map((t) => ticketRowHtml(t, true)).join('');
     main.innerHTML = `
-      <div class="page-head"><h1>Atendimento</h1><button class="btn primary" id="btn-new-tk">+ Abrir ticket</button></div>
+      <div class="page-head"><h1>Central de Atendimento</h1><button class="btn primary" id="btn-new-tk">+ Abrir ticket</button></div>
       <p class="muted small">Tickets dos membros; os que você abriu ficam em “Abertos por mim”. <b>${nNew}</b> não iniciado${nNew === 1 ? '' : 's'} · <b>${nMine}</b> pendente${nMine === 1 ? '' : 's'} com você · <b>${nWaiting}</b> pendente${nWaiting === 1 ? '' : 's'} de atendimento no total.${reportsHidden ? ' Os tickets de Reclamação / Denúncia ficam só com o líder.' : ''}</p>
       <div class="row tk-filters">
         <div class="seg rc-filter" role="group" aria-label="Filtrar tickets">
@@ -3110,7 +3124,7 @@
     const t = state.tickets.find((x) => x.id === id);
     if (t?.mine) markTicketSeen(t.id);
     const staff = !!t && !t.mine;
-    const home = supportOn() ? ['#/atendimento', 'Atendimento'] : ['#/tickets', 'Meus tickets'];
+    const home = supportOn() ? ['#/atendimento', 'Central de Atendimento'] : ['#/tickets', 'Central de Atendimento'];
     renderHeader(supportOn() ? 'support' : 'tickets');
     if (!t) {
       main.innerHTML = `<p><a href="${home[0]}" class="small">← ${home[1]}</a></p><div class="card empty">Ticket não encontrado.</div>`;
