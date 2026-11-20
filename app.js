@@ -3763,6 +3763,9 @@
     const form = $('#tk-reply');
     if (form) {
       const picker = bindImagePicker(form);
+      // A caixa cresce com o texto (até 60% da tela; depois rola)
+      const box = $('#tk-body'); const grow = () => { box.style.height = 'auto'; box.style.height = `${Math.min(box.scrollHeight + 2, window.innerHeight * 0.6)}px`; };
+      box.addEventListener('input', grow);
       const internal = $('#tk-internal');
       internal?.addEventListener('change', () => form.classList.toggle('internal', internal.checked));
       form.addEventListener('submit', async (e) => {

@@ -1016,3 +1016,6 @@ body.has-fab main { padding-bottom: 90px; }
 .tk-who label { white-space: nowrap; width: auto; margin: 0; display: inline-flex; align-items: center; gap: 6px; cursor: pointer; color: var(--muted); font-weight: 600; }
 .tk-who label:has(input:checked) { color: var(--text); }
 .tk-who input { width: auto; accent-color: var(--accent); margin: 0; }
+
+/* Resposta do ticket: caixa maior e que cresce com o texto */
+.tk-compose textarea { min-height: 180px; max-height: 60vh; line-height: 1.5; }
