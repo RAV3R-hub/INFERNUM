@@ -5623,6 +5623,17 @@
   //  Formulários
   // =====================================================================
 
+  // Horário sugerido e dias permitidos por tipo de evento (0 = domingo … 6 = sábado)
+  const TYPE_SCHEDULE = [
+    { match: 'guerra das sombras', time: '19:30', days: [4, 6], label: 'quintas e sábados' },
+    { match: 'vigilia', time: '20:00', days: [0], label: 'domingos' },
+  ];
+  const typeSchedule = (typeId) => {
+    const n = norm(state.types.find((t) => t.id === Number(typeId))?.name);
+    return n ? TYPE_SCHEDULE.find((r) => n.includes(r.match)) || null : null;
+  };
+  const ymdOf = (d) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+
   function openEventForm(ev) {
     const editing = !!ev;
     let start = ev?.starts_at;
@@ -5644,10 +5655,12 @@
           <div class="muted small field-hint">Agrupa os eventos no painel de Frequência. Novos tipos são cadastrados na tabela <code>event_types</code>.</div>
         </div>
         <div class="grid2">
-          <div class="field"><label for="f-start">Data e hora</label><input id="f-start" type="datetime-local" required value="${toLocalInput(start)}"></div>
-          ${editing ? '' : `<div class="field"><label for="f-weeks">Repetir por quantas semanas</label>
-            <select id="f-weeks">${[1, 2, 3, 4, 6, 8, 12].map((n) => `<option value="${n}">${n === 1 ? 'Só esta vez' : `${n} semanas`}</option>`).join('')}</select></div>`}
+          <div class="field"><label for="f-date">Data</label><span id="f-date-box"></span></div>
+          <div class="field"><label for="f-time">Hora</label><input id="f-time" type="time" required value="${toLocalInput(start).slice(11, 16)}"></div>
         </div>
+        <div class="muted small field-hint" id="f-days-hint" hidden></div>
+        ${editing ? '' : `<div class="field"><label for="f-weeks">Repetir por quantas semanas</label>
+          <select id="f-weeks">${[1, 2, 3, 4, 6, 8, 12].map((n) => `<option value="${n}">${n === 1 ? 'Só esta vez' : `${n} semanas`}</option>`).join('')}</select></div>`}
         ${editing ? '' : `<div class="field"><label for="f-format">Formato dos times <span class="muted small">(pode escolher depois)</span></label>
           <select id="f-format"><option value="">Sem times</option><option value="guerra">Guerra (12 times)</option><option value="rito">Outros (até 10 times)</option></select></div>`}
         <div class="field">
@@ -5679,11 +5692,43 @@
       titleInput.addEventListener('input', () => {
         if (!typeSel.dataset.touched && !editing) {
           const g = guessTypeId(titleInput.value, state.types);
+          const before = typeSel.value;
           typeSel.value = g ? String(g) : '';
+          if (typeSel.value !== before) renderDate(true);
         }
         suggestFormat();
       });
-      typeSel.addEventListener('change', () => { typeSel.dataset.touched = '1'; suggestFormat(); });
+      // Data e hora conforme o tipo: Guerra das Sombras só às quintas e sábados (19:30), Vigília só aos domingos (20:00)
+      const timeInput = $('#f-time', d);
+      const hint = $('#f-days-hint', d);
+      let curDate = toLocalInput(start).slice(0, 10);
+      timeInput.addEventListener('input', () => { timeInput.dataset.touched = '1'; });
+      const renderDate = (applyTime) => {
+        const box = $('#f-date-box', d);
+        const prevVal = $('#f-date', d)?.value;
+        if (prevVal) curDate = prevVal;
+        const rule = typeSchedule(typeSel.value);
+        if (!rule) {
+          box.innerHTML = `<input id="f-date" type="date" required value="${curDate}">`;
+          hint.hidden = true;
+        } else {
+          const opts = [];
+          const day = new Date(); day.setHours(12, 0, 0, 0);
+          for (let i = 0; opts.length < 16 && i < 120; i++, day.setDate(day.getDate() + 1)) {
+            if (rule.days.includes(day.getDay())) opts.push(ymdOf(day));
+          }
+          // Na edição, mantém a data atual do evento mesmo fora da regra
+          if (editing && !opts.includes(curDate)) opts.unshift(curDate);
+          const sel = opts.includes(curDate) ? curDate : opts[0];
+          const label = (v) => new Date(`${v}T12:00:00`).toLocaleDateString('pt-BR', { weekday: 'short', day: '2-digit', month: '2-digit' }).replace('.', '');
+          box.innerHTML = `<select id="f-date" required>${opts.map((v) => `<option value="${v}" ${v === sel ? 'selected' : ''}>${esc(label(v))}</option>`).join('')}</select>`;
+          hint.textContent = `${typeSel.selectedOptions[0]?.textContent || 'Este tipo'}: só ${rule.label}, às ${rule.time}.`;
+          hint.hidden = false;
+          if (applyTime && !timeInput.dataset.touched) timeInput.value = rule.time;
+        }
+      };
+      renderDate(!editing);
+      typeSel.addEventListener('change', () => { typeSel.dataset.touched = '1'; suggestFormat(); renderDate(true); });
       fmt?.addEventListener('change', () => { fmt.dataset.touched = '1'; });
 
       $('#ev-form', d).addEventListener('submit', async (e) => {
@@ -5691,7 +5736,7 @@
         const submit = $('button[type=submit]', d);
         const title = titleInput.value.trim();
         const description = $('#f-desc', d).value.trim() || null;
-        const startDate = new Date($('#f-start', d).value);
+        const startDate = new Date(`${$('#f-date', d).value}T${timeInput.value}`);
         const type_id = Number(typeSel.value) || null;
         const closeVal = $('#f-close', d).value;
         const rsvp_close_minutes = closeVal === '' ? null : Number(closeVal);
