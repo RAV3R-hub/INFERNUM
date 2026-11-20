@@ -1751,7 +1751,7 @@
         ${ev.description ? `<div class="desc">${esc(ev.description)}</div>` : ''}
         ${isOfficer() ? `<div class="counts"><span class="c-yes">✔ ${c.yes} vão</span><span class="c-no">✖ ${c.no} não vão</span><span class="muted">${c.pending} sem resposta</span></div>
         <div class="bar"><span class="y" style="width:${pct(c.yes)}%"></span><span class="n" style="width:${pct(c.no)}%"></span></div>` : ''}
-        <div class="ev-foot"><a class="btn small ghost" href="#/evento/${ev.id}">🔎 Detalhar evento</a></div>
+        <div class="ev-foot"><a class="btn small ghost" href="#/evento/${ev.id}">🔎 Detalhar evento</a>${calBtn(ev)}</div>
       </div>
       ${isOpen(ev) ? rsvpButtons(ev) : ''}
     </div>`;
@@ -1844,7 +1844,61 @@
     });
   }
 
+  // ---------- Adicionar à agenda ----------
+  // Aparece nos eventos futuros em que a conta escolhida respondeu "Vou"
+  const CAL_MINUTES = 15;
+  const calBtn = (ev) => (isOpen(ev) && !hasStarted(ev) && myRsvp(ev)?.going
+    ? ` <button class="btn small ghost" type="button" data-cal="${ev.id}" title="Colocar este evento na sua agenda">📅 Adicionar à Agenda</button>` : '');
+  function calInfo(ev) {
+    const start = new Date(ev.starts_at);
+    const end = new Date(start.getTime() + CAL_MINUTES * 60000);
+    const url = `${location.origin}${location.pathname}#/evento/${ev.id}`;
+    const team = myTeam(ev);
+    const details = [ev.description || '', team ? `Seu time: ${team}` : '', `Detalhes e times: ${url}`].filter(Boolean).join('\n\n');
+    return { start, end, url, details, title: `${ev.title} · ${CFG.clanName || 'Clã'}` };
+  }
+  const calStamp = (d) => d.toISOString().replace(/[-:]/g, '').replace(/\.\d{3}/, '');
+  function googleCalUrl(ev) {
+    const c = calInfo(ev);
+    const q = new URLSearchParams({ action: 'TEMPLATE', text: c.title, dates: `${calStamp(c.start)}/${calStamp(c.end)}`, details: c.details });
+    return `https://calendar.google.com/calendar/render?${q}`;
+  }
+  function icsText(ev) {
+    const c = calInfo(ev);
+    // texto no formato .ics: escapa \ ; , e quebras de linha
+    const e = (s) => String(s).replace(/\\/g, '\\\\').replace(/;/g, '\\;').replace(/,/g, '\\,').replace(/\r?\n/g, '\\n');
+    return ['BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//INFERNUM//Eventos//PT', 'CALSCALE:GREGORIAN', 'METHOD:PUBLISH',
+      'BEGIN:VEVENT', `UID:infernum-evento-${ev.id}@${location.host || 'infernum'}`, `DTSTAMP:${calStamp(new Date())}`,
+      `DTSTART:${calStamp(c.start)}`, `DTEND:${calStamp(c.end)}`, `SUMMARY:${e(c.title)}`, `DESCRIPTION:${e(c.details)}`, `URL:${c.url}`,
+      'BEGIN:VALARM', 'ACTION:DISPLAY', `DESCRIPTION:${e(c.title)}`, 'TRIGGER:-PT30M', 'END:VALARM',
+      'END:VEVENT', 'END:VCALENDAR', ''].join('\r\n');
+  }
+  function openCalendar(ev) {
+    openDialog(`
+      <h2>📅 Adicionar à agenda</h2>
+      <p class="muted small" style="margin:0 0 12px"><b>${esc(ev.title)}</b> · ${esc(fmtDay(ev.starts_at))} às ${fmtTime(ev.starts_at)}</p>
+      <div class="stack cal-opts">
+        <a class="btn" href="${esc(googleCalUrl(ev))}" target="_blank" rel="noopener">Google Agenda</a>
+        <button class="btn" type="button" id="cal-ics">Celular / Outlook <span class="muted small">(arquivo .ics, com aviso 30 min antes)</span></button>
+      </div>
+      <div class="row end" style="margin-top:12px"><button class="btn ghost" data-close>Fechar</button></div>`, (d) => {
+      $('#cal-ics', d).addEventListener('click', () => {
+        const blob = new Blob([icsText(ev)], { type: 'text/calendar;charset=utf-8' });
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = `infernum-evento-${ev.id}.ics`;
+        document.body.appendChild(a); a.click(); a.remove();
+        setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+        toast('Abra o arquivo baixado para salvar na agenda');
+      });
+    });
+  }
+
   function bindRsvp(root, events, rerender) {
+    root.querySelectorAll('[data-cal]').forEach((b) => b.addEventListener('click', () => {
+      const ev = events.find((x) => x.id === Number(b.dataset.cal));
+      if (ev) openCalendar(ev);
+    }));
     root.querySelectorAll('[data-withdraw]').forEach((b) => b.addEventListener('click', () => {
       const ev = events.find((x) => x.id === Number(b.dataset.withdraw));
       if (ev) openWithdrawDialog(ev, rerender);
@@ -2045,7 +2099,7 @@
         </div>
         ${ev.description ? `<div class="desc" style="white-space:pre-line">${esc(ev.description)}</div>` : ''}
         <div class="row">
-          <button class="btn small ghost" id="btn-copy">🔗 Copiar link</button>
+          <button class="btn small ghost" id="btn-copy">🔗 Copiar link</button>${calBtn(ev)}
           ${isOfficer() ? `<button class="btn small ghost" id="btn-copy-list">📋 Copiar lista</button>
             <span class="spacer"></span>
             ${can('teams_build') ? `<a class="btn small primary" id="btn-teams" href="#/evento/${ev.id}/times">⚔ ${finished ? 'Revisar times' : 'Montar times'}</a>` : ''}

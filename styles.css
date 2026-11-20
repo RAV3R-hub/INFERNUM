@@ -981,3 +981,5 @@ body.has-fab main { padding-bottom: 90px; }
 .event .actions { flex-wrap: wrap; justify-content: flex-end; }
 .event .actions .abs-note { flex-basis: 100%; text-align: right; margin-top: 0; }
 @media (max-width: 640px) { .event .actions .abs-note { text-align: left; } }
+.cal-opts .btn { justify-content: center; text-align: center; }
+.cal-opts { display: flex; flex-direction: column; align-items: stretch; gap: 8px; min-width: min(360px, 80vw); }
