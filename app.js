@@ -5357,7 +5357,7 @@
   }
 
   // ---------- Estatísticas do clã (por ciclo do jogo; ícone 📊 ao lado do sininho) ----------
-  const PANEL = { sel: 'cur', inactiveN: 3, type: '' };
+  const PANEL = { sel: 'cur', inactiveN: 3, type: '', attr: 'resonance' };
   const SIDE = { shadows: { icon: '🌑', label: 'das Sombras' }, immortal: { icon: '👑', label: 'Imortal' } };
   const DAY_MS = 86400000;
   const dmy = (t) => new Date(t).toLocaleDateString('pt-BR');
@@ -5583,14 +5583,16 @@
       const diff = evoPts[evoPts.length - 1].v - evoPts[0].v;
       evoChart = lineChart(evoPts, { time: true }) + `<div class="chart-foot">Desde ${evoPts[0].label}: <b class="${diff > 0 ? 'c-yes' : diff < 0 ? 'c-no' : ''}">${diff > 0 ? '+' : ''}${intFmt(diff)}</b> na média do clã</div>`;
     }
+    // Quem mais evoluiu: atributo escolhido no quadro
+    const gAttr = ATTRS.find((a) => a.key === PANEL.attr) || ATTRS.find((a) => a.key === 'resonance');
     const gains = members.map((m) => {
       const h = histBy[m.id] || [];
-      const before = valueAt(m, 'resonance', per.from, h); const after = valueAt(m, 'resonance', tEndEvo, h);
+      const before = valueAt(m, gAttr.key, per.from, h); const after = valueAt(m, gAttr.key, tEndEvo, h);
       return { m, before, after, gain: before != null && after != null ? after - before : 0 };
     }).filter((g) => g.gain > 0).sort((a, b) => b.gain - a.gain || byName(a.m, b.m)).slice(0, 8);
     const gainChart = gains.length ? hbars(gains.map((g) => ({ label: displayName(g.m), labelHtml: link(g.m), value: g.gain, color: 'var(--ember)',
       valHtml: `<b class="c-yes">+${intFmt(g.gain)}</b> <span class="muted">${intFmt(g.before)} → ${intFmt(g.after)}</span>`,
-      title: `${displayName(g.m)}: ${intFmt(g.before)} → ${intFmt(g.after)}` }))) : empty('Ninguém aumentou a Ressonância no período (ou ainda não atualizou no site).');
+      title: `${displayName(g.m)} · ${gAttr.label}: ${intFmt(g.before)} → ${intFmt(g.after)}` }))) : empty(`Ninguém aumentou ${gAttr.label === 'Perfurar Armadura' ? 'o' : 'a'} ${gAttr.label} no período (ou ainda não atualizou no site).`);
 
     // ----- Saúde do clã -----
     const span = Math.max(DAY_MS, Math.min(per.to, now) - per.from);
@@ -5697,7 +5699,10 @@
         <div class="chart-grid evo">
           <div class="card chart wide"><h4>Ressonância média do clã</h4>${evoChart}
             <div class="muted small">Considera os membros ativos de hoje. Antes da primeira atualização de cada um, vale o primeiro valor informado.</div></div>
-          <div class="card chart"><h4>🔥 Quem mais evoluiu no período</h4>${gainChart}</div>
+          <div class="card chart wide"><h4>🔥 Quem mais evoluiu no período</h4>
+            <div class="evo-tabs" role="tablist">${ATTRS.slice().sort((a, b) => (a.key === 'resonance' ? -1 : b.key === 'resonance' ? 1 : 0))
+              .map((a) => `<button type="button" class="evo-tab" role="tab" data-pn-attr="${a.key}" aria-selected="${a.key === gAttr.key}">${esc(a.label)}</button>`).join('')}</div>
+            ${gainChart}</div>
         </div>
       </section>
       <section class="stats-section">
@@ -5733,6 +5738,12 @@
     $('#pn-copy-inactive')?.addEventListener('click', () => copy([`**Inativos: faltaram os últimos ${N} eventos**`, ...inactive.map((r) => `• ${displayName(r.m)}`)].join('\n'), 'Lista copiada'));
     $('#pn-copy-incomplete')?.addEventListener('click', () => copy(['**Perfis para atualizar no site**', ...incomplete.map((r) => `• ${displayName(r.m)} (${r.miss.join(', ')})`)].join('\n'), 'Lista copiada'));
     $('#pn-type').addEventListener('change', (e) => { PANEL.type = e.target.value; viewPanel().catch(fail); });
+    main.querySelectorAll('[data-pn-attr]').forEach((b) => b.addEventListener('click', () => {
+      if (PANEL.attr === b.dataset.pnAttr) return;
+      PANEL.attr = b.dataset.pnAttr;
+      const y = window.scrollY;
+      viewPanel().then(() => window.scrollTo(0, y)).catch(fail);
+    }));
     $('#pn-copy-pending')?.addEventListener('click', () => {
       copy([`**Ainda não responderam: ${nextEv.title} ${fmtShortDate(nextEv.starts_at)}**`, ...pendingNames.map((m) => `• ${displayName(m)}`)].join('\n'), 'Lista copiada');
     });
