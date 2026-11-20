@@ -5271,8 +5271,7 @@
     const pendingNames = nextEv ? members.filter((m) => !nextEv.rsvps.some((r) => r.user_id === m.id)).sort(byName) : [];
     const pendingBox = nextEv ? `<div class="pending-answer">
         <b>Ainda não responderam a <a href="#/evento/${nextEv.id}">${esc(nextEv.title)} ${fmtShortDate(nextEv.starts_at)}</a> (${pendingNames.length}):</b>
-        ${pendingNames.length ? `<div class="name-chips">${pendingNames.map((m) => `<span class="name-chip">${link(m)}</span>`).join('')}</div>
-          <button class="btn small" id="st-copy-pending">📋 Copiar lista</button>` : '<span class="c-yes"> todos responderam! 🎉</span>'}
+        ${pendingNames.length ? `<div><button class="btn small" id="st-copy-pending">📋 Copiar lista de membros sem resposta</button></div>` : '<span class="c-yes"> todos responderam! 🎉</span>'}
       </div>` : '';
 
     const freq = computeFrequency(evs, members).filter((r) => r.total);
