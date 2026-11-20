@@ -1020,3 +1020,8 @@ body.has-fab main { padding-bottom: 90px; }
 /* Resposta do ticket: caixa maior e que cresce com o texto */
 .tk-compose textarea { min-height: 180px; max-height: 60vh; line-height: 1.5; }
 .evo-peak { color: var(--gold); }
+
+/* Sair do clã */
+.leave-card { margin-top: 12px; }
+.leave-card.pending { border-color: #6b4a12; }
+.leave-card .row.end { margin-top: 10px; }
