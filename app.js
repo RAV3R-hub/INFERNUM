@@ -3506,22 +3506,33 @@
 
     // Meus atributos comparados com a média do clã
     const clan = activeMembers().filter(hasBuild);
-    const cmp = hasBuild(me) ? ATTRS.map((a) => {
-      const vals = clan.map((m) => m[a.key]);
+    const cmpRows = (group, groupLabel) => ATTRS.map((a) => {
+      const vals = group.map((m) => m[a.key]);
       const mean = vals.length ? Math.round(vals.reduce((s, v) => s + v, 0) / vals.length) : null;
       const mineVal = me[a.key];
       const scale = Math.max(mineVal, mean || 0) * 1.1 || 1;
       const diff = mean ? (mineVal - mean) / mean : 0;
       return `<div class="cmp-row">
         <span class="cmp-label">${a.label}</span>
-        <div class="cmp-track" title="${self ? 'Você' : esc(who)}: ${fmtNum(mineVal)} · Média do clã: ${fmtNum(mean)}">
+        <div class="cmp-track" title="${self ? 'Você' : esc(who)}: ${fmtNum(mineVal)} · ${groupLabel}: ${fmtNum(mean)}">
           <span class="me" style="width:${(100 * mineVal) / scale}%"></span>
           <span class="clan" style="width:${(100 * (mean || 0)) / scale}%"></span>
         </div>
-        <span class="cmp-val"><b>${fmtNum(mineVal)}</b><small>clã ${fmtNum(mean)}</small></span>
+        <span class="cmp-val"><b>${fmtNum(mineVal)}</b><small>${groupLabel === 'Média do clã' ? 'clã' : 'faixa'} ${fmtNum(mean)}</small></span>
         <span class="cmp-diff ${diff >= 0 ? 'c-yes' : 'c-no'}">${diff >= 0 ? '+' : ''}${Math.round(diff * 100)}%</span>
       </div>`;
-    }).join('') : `<p class="muted">${self ? 'Informe sua classe e seus atributos em “Editar perfil” para comparar com o clã.' : 'Este membro ainda não informou classe e atributos.'}</p>`;
+    }).join('');
+    const noBuild = `<p class="muted">${self ? 'Informe sua classe e seus atributos em “Editar perfil” para comparar com o clã.' : 'Este membro ainda não informou classe e atributos.'}</p>`;
+    const cmp = hasBuild(me) ? cmpRows(clan, 'Média do clã') : noBuild;
+    // Mesma faixa de Ressonância (±500)
+    const BAND = 500;
+    const bandLo = Math.max(0, (me.resonance || 0) - BAND);
+    const bandHi = (me.resonance || 0) + BAND;
+    const band = hasBuild(me) ? clan.filter((m) => m.id !== me.id && m.resonance >= bandLo && m.resonance <= bandHi)
+      .sort((a, b) => Math.abs(a.resonance - me.resonance) - Math.abs(b.resonance - me.resonance)) : [];
+    const bandHtml = !hasBuild(me) ? noBuild
+      : !band.length ? `<p class="muted">Nenhum outro membro com Ressonância entre ${fmtNum(bandLo)} e ${fmtNum(bandHi)}.</p>`
+        : cmpRows(band, 'Média da faixa');
 
     main.innerHTML = `
       ${self ? '' : '<p><a href="#/membros" class="small">← Membros</a></p>'}
@@ -3551,15 +3562,22 @@
         <div class="card stat"><div class="stat-num ${f.noShow ? 'c-no' : 'c-yes'}">${f.noShow}</div><div class="muted small">vezes que confirmou e faltou</div></div>
       </div>
 
+      ${powerRankCard(me, self)}
+
       <div class="panels">
-        <div class="card">
-          <h2>Próximos eventos ${pending ? `<span class="badge warn">${pending} sem resposta</span>` : ''}</h2>
-          ${upRows || '<p class="muted">Nenhum evento agendado.</p>'}
-        </div>
         <div class="card">
           <h2>${self ? 'Você' : esc(who)} × média do clã</h2>
           <div class="cmp-legend small"><span><i class="lg me"></i>${self ? 'Você' : esc(who)}</span><span><i class="lg clan"></i>Média de ${clan.length} membros</span></div>
           ${cmp}
+        </div>
+        <div class="card">
+          <h2>${self ? 'Você' : esc(who)} × mesma faixa</h2>
+          <div class="cmp-legend small"><span><i class="lg me"></i>${self ? 'Você' : esc(who)}</span><span><i class="lg clan"></i>${hasBuild(me) ? `Média de ${band.length} ${band.length === 1 ? 'membro' : 'membros'} com Ressonância ${fmtNum(bandLo)}–${fmtNum(bandHi)}` : 'Mesma faixa de Ressonância (±500)'}</span></div>
+          ${bandHtml}
+        </div>
+        <div class="card">
+          <h2>Próximos eventos ${pending ? `<span class="badge warn">${pending} sem resposta</span>` : ''}</h2>
+          ${upRows || '<p class="muted">Nenhum evento agendado.</p>'}
         </div>
         <div class="card">
           <h2>Últimos eventos</h2>
@@ -3576,6 +3594,8 @@
       ${showNotes ? notesCard(me, allNotes.filter((n) => n.member_id === me.id), members) : ''}`;
 
     $('#btn-edit-pf')?.addEventListener('click', openProfile);
+    $('#btn-pr-fill')?.addEventListener('click', openProfile);
+    $('#btn-pr-info')?.addEventListener('click', () => openPowerInfo(me));
     bindPilotsCard(me, () => viewMyPanel(userId));
     $('#p-days').addEventListener('change', (e) => { P.days = Number(e.target.value); viewMyPanel(userId); });
 
@@ -3592,6 +3612,82 @@
       if (!(await confirmDialog('Apagar esta anotação? Não dá para desfazer.', 'Apagar'))) return;
       try { await api.deleteNote(Number(b.dataset.delNote)); toast('Anotação apagada'); await viewMyPanel(userId); } catch (err) { fail(err); }
     }));
+  }
+
+  // ---------- Rank de força (perfil) ----------
+  // Cada atributo vira uma nota de 0 a 100 comparada ao melhor do clã; a pontuação (0 a 1000) é a média ponderada.
+  const POWER_WEIGHTS = { resonance: 0.5, armor: 0.175, armor_pen: 0.175, potency: 0.075, resistance: 0.075 };
+  function powerRanking() {
+    const list = activeMembers().filter(hasBuild);
+    const max = Object.fromEntries(ATTRS.map((a) => [a.key, Math.max(0, ...list.map((m) => m[a.key] || 0))]));
+    return list.map((m) => ({
+      m,
+      score: Math.round(10 * ATTRS.reduce((s, a) => s + (POWER_WEIGHTS[a.key] || 0) * (max[a.key] ? (100 * (m[a.key] || 0)) / max[a.key] : 0), 0)),
+    })).sort((a, b) => (b.score - a.score) || byName(a.m, b.m));
+  }
+  const ordinal = (n) => `${n}º`;
+  function powerRankCard(person, self) {
+    const rows = powerRanking();
+    const mine = rows.findIndex((r) => r.m.id === person.id);
+    const cls = CLASS[person.char_class];
+    const sameClass = rows.filter((r) => r.m.char_class === person.char_class);
+    const clsPos = sameClass.findIndex((r) => r.m.id === person.id);
+    const top = rows.slice(0, 10);
+    const rowHtml = (r, i) => `<li class="${r.m.id === person.id ? 'me' : ''}">
+          <span class="pr-n">${i + 1}</span>${avatar(r.m)}
+          <span class="pr-name">${esc(displayName(r.m))}</span>${classTag(r.m.char_class)}
+          <span class="pr-score">${r.score}</span></li>`;
+    const head = mine < 0
+      ? `<div class="pr-missing">${self
+        ? `Complete sua classe e os 5 atributos no perfil para entrar no rank.${state.me.id === person.id ? ' <button class="btn small primary" id="btn-pr-fill" type="button">Completar perfil</button>' : ''}`
+        : 'Este membro ainda não completou a classe e os 5 atributos, então não entra no rank.'}</div>`
+      : `<div class="pr-pos">
+          <div class="card stat"><div class="stat-num c-gold">${ordinal(mine + 1)}<span class="muted" style="font-size:1rem"> de ${rows.length}</span></div><div class="muted small">no clã</div></div>
+          <div class="card stat"><div class="stat-num">${ordinal(clsPos + 1)}<span class="muted" style="font-size:1rem"> de ${sameClass.length}</span></div><div class="muted small">entre ${cls ? `os ${esc(cls.label)}` : 'a mesma classe'}</div></div>
+          <div class="card stat"><div class="stat-num">${rows[mine].score}</div><div class="muted small">pontos de força (de 1000)</div></div>
+        </div>`;
+    return `<div class="card pr-card" style="margin-top:12px">
+      <h2>💪 Rank de força <button class="pr-info" id="btn-pr-info" type="button" title="Como a pontuação é calculada" aria-label="Como a pontuação é calculada">!</button></h2>
+      ${head}
+      <h3 class="pr-sub">Top 10 do clã</h3>
+      ${top.length ? `<ol class="pr-top">${top.map(rowHtml).join('')}${mine >= 10 ? `<li class="pr-gap" aria-hidden="true">⋯</li>${rowHtml(rows[mine], mine)}` : ''}</ol>` : '<p class="muted">Ninguém completou o perfil ainda.</p>'}
+    </div>`;
+  }
+  // Janela do "!": explica a conta, com os melhores do clã e a conta deste membro
+  function openPowerInfo(person) {
+    const list = activeMembers().filter(hasBuild);
+    const ranked = list.some((m) => m.id === person.id);
+    const fmtW = (w) => `${String(Math.round(w * 1000) / 10).replace('.', ',')}%`;
+    const fmt1 = (n) => (Math.round(n * 10) / 10).toLocaleString('pt-BR');
+    let total = 0;
+    const rows = [...ATTRS].sort((a, b) => (POWER_WEIGHTS[b.key] || 0) - (POWER_WEIGHTS[a.key] || 0)).map((a) => {
+      const w = POWER_WEIGHTS[a.key] || 0;
+      const best = list.reduce((b, m) => ((m[a.key] || 0) > (b?.[a.key] || 0) ? m : b), null);
+      const max = best?.[a.key] || 0;
+      const nota = max ? (100 * (person[a.key] || 0)) / max : 0;
+      const pts = 10 * w * nota;
+      total += pts;
+      return `<tr><td>${esc(a.label)}</td><td>${fmtW(w)}</td>
+        <td>${fmtNum(max)}${best ? `<br><span class="muted small">${esc(displayName(best))}</span>` : ''}</td>
+        ${ranked ? `<td>${fmtNum(person[a.key])}</td><td>${fmt1(nota)}</td><td><b>${fmt1(pts)}</b></td>` : ''}</tr>`;
+    }).join('');
+    const self = person.id === state.me.id;
+    openDialog(`<div class="stack pr-help">
+      <h2>Como é calculada a pontuação</h2>
+      <ol class="small">
+        <li>Cada atributo é comparado com o <b>maior valor do clã</b> naquele atributo e vira uma nota de 0 a 100. Ter o maior valor = nota 100; metade do maior = nota 50.</li>
+        <li>Cada nota é multiplicada pelo peso do atributo e as notas são somadas. O total vai de 0 a 1000.</li>
+        <li>Para ter 1000 pontos, é preciso ser o melhor do clã nos 5 atributos ao mesmo tempo.</li>
+        <li>Como a comparação é com o clã, a pontuação pode mudar quando outro membro evolui.</li>
+        <li>Só entra no rank quem preencheu a classe e os 5 atributos no perfil.</li>
+      </ol>
+      <div class="pr-table-wrap"><table class="pr-table small">
+        <thead><tr><th>Atributo</th><th>Peso</th><th>Melhor do clã</th>${ranked ? `<th>${self ? 'Você' : esc(displayName(person))}</th><th>Nota</th><th>Pontos</th>` : ''}</tr></thead>
+        <tbody>${rows}</tbody>
+        ${ranked ? `<tfoot><tr><td colspan="5">Total</td><td><b>${Math.round(total)}</b></td></tr></tfoot>` : ''}
+      </table></div>
+      <div class="row end"><button class="btn primary" data-close>Entendi</button></div>
+    </div>`);
   }
 
   // ---------- Tickets no perfil ----------
