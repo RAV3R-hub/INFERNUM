@@ -110,6 +110,13 @@
   const fmtDay3 = (s) => (s ? s.split('-').reverse().join('/') : '');
 
   // O que o membro comum recebe do perfil dos outros (igual à visão "member_directory" do banco)
+  // Resultado da guerra: só os campos esperados, já limpos
+  function cleanResult(o) {
+    const n = (v) => (v === '' || v == null || !Number.isFinite(Number(v)) ? null : Math.max(0, Math.min(1e9, Math.trunc(Number(v)))));
+    const t = (v, max) => { const x = String(v ?? '').trim().slice(0, max); return x || null; };
+    return { outcome: o?.outcome === 'loss' ? 'loss' : 'win', opponent: t(o?.opponent, 60), score_us: n(o?.score_us), score_them: n(o?.score_them), notes: t(o?.notes, 1000) };
+  }
+  const scoreText = (r) => (r.score_us == null && r.score_them == null ? '' : `${r.score_us ?? '–'} × ${r.score_them ?? '–'}`);
   const directoryRow = (p) => ({
     id: p.id, discord_name: p.discord_name, game_name: p.game_name, role: p.role, managed: !!p.managed,
     char_class: p.char_class, armor: p.armor, armor_pen: p.armor_pen, potency: p.potency, resistance: p.resistance, resonance: p.resonance,
@@ -170,6 +177,36 @@
       async absences() { return ok(await sb.from('absences').select('*').order('starts_on', { ascending: false }).limit(500)); },
       async saveAbsence(userId, start, end, reason) { return ok(await sb.rpc('save_absence', { p_user: userId, p_start: start, p_end: end, p_reason: reason })); },
       async deleteAbsence(id) { ok(await sb.rpc('delete_absence', { p_id: id })); },
+      // Resultado da guerra: todos os membros veem; as observações só a liderança
+      async eventResult(id) {
+        const r = await sb.from('event_results').select('*').eq('event_id', id).maybeSingle();
+        if (r.error || !r.data) return null; // sem resultado (ou SQL novo ainda não rodado)
+        if (isOfficer()) {
+          const n = await sb.from('event_result_notes').select('notes').eq('event_id', id).maybeSingle();
+          r.data.notes = n.data?.notes || '';
+        }
+        return r.data;
+      },
+      // Resultados de vários eventos de uma vez (lista de eventos)
+      async eventResults(ids) {
+        if (!ids.length) return [];
+        const r = await sb.from('event_results').select('*').in('event_id', ids);
+        if (r.error) return []; // SQL novo ainda não rodado
+        if (isOfficer() && r.data.length) {
+          const n = await sb.from('event_result_notes').select('event_id, notes').in('event_id', r.data.map((x) => x.event_id));
+          const by = Object.fromEntries((n.data || []).map((x) => [x.event_id, x.notes]));
+          r.data.forEach((x) => { x.notes = by[x.event_id] || ''; });
+        }
+        return r.data;
+      },
+      async opponents() {
+        const r = await sb.from('event_results').select('opponent').not('opponent', 'is', null).order('updated_at', { ascending: false }).limit(300);
+        return r.error ? [] : [...new Set(r.data.map((x) => x.opponent))];
+      },
+      async saveResult(eventId, o) {
+        ok(await sb.rpc('save_event_result', { p_event: eventId, p_outcome: o.outcome, p_opponent: o.opponent || null, p_us: o.score_us ?? null, p_them: o.score_them ?? null, p_notes: o.notes || null }));
+      },
+      async deleteResult(eventId) { ok(await sb.rpc('delete_event_result', { p_event: eventId })); },
       async saveProfile(fields, phone) {
         ok(await sb.from('profiles').update(fields).eq('id', state.user.id));
         if (phone !== undefined) ok(await sb.from('member_contacts').upsert({ user_id: state.user.id, phone: phone || null }));
@@ -376,6 +413,8 @@
       attendance: [],
       history: [],
       absences: [],
+      results: [],
+      resultNotes: [],
       nextId: 100,
     };
     const profile = (id) => db.profiles.find((p) => p.id === id);
@@ -478,6 +517,12 @@
         db.attendance.push({ event_id: id, user_id: p.id, present });
       });
     }
+
+    // Resultados de duas Guerras passadas (as observações só a liderança vê)
+    db.results.push(
+      { event_id: 14, outcome: 'win', opponent: 'Legião Sombria', score_us: 5, score_them: 3, updated_by: 'u1', updated_at: day(-8, 23) },
+      { event_id: 18, outcome: 'loss', opponent: 'Os Imortais', score_us: 2, score_them: 6, updated_by: 'u0', updated_at: day(-20, 23) });
+    db.resultNotes.push({ event_id: 18, notes: 'Faltaram healers no segundo round. Reforçar a escalação dos Cruzados.' });
 
     // Um evento passado com times no formato "Outros", com um time renomeado e você escalado
     Object.assign(db.events.find((e) => e.id === 12), { title: 'Torre Amaldiçoada', team_format: 'rito', team_count: 3, team_names: ['Revenge', null, null] });
@@ -714,6 +759,34 @@
         db.rsvps = db.rsvps.filter((r) => !(r.absence_id === id && !r.going && freed.has(r.event_id)));
         if (ongoing) a.ends_on = today;
         else db.absences = db.absences.filter((x) => x.id !== id);
+      },
+      async eventResult(id) {
+        const r = db.results.find((x) => x.event_id === id);
+        if (!r) return null;
+        return isOfficer() ? { ...r, notes: db.resultNotes.find((n) => n.event_id === id)?.notes || '' } : { ...r };
+      },
+      async eventResults(ids) {
+        const out = [];
+        for (const id of ids) { const r = await this.eventResult(id); if (r) out.push(r); }
+        return out;
+      },
+      async opponents() {
+        return [...new Set(db.results.slice().sort((a, b) => Date.parse(b.updated_at) - Date.parse(a.updated_at)).map((r) => r.opponent).filter(Boolean))];
+      },
+      async saveResult(eventId, o) {
+        if (!isOfficer()) throw new Error('Só oficiais e o líder registram resultados');
+        const ev = db.events.find((e) => e.id === eventId);
+        if (!ev || Date.parse(ev.starts_at) > Date.now()) throw new Error('O resultado só pode ser registrado depois que o evento começar');
+        const row = cleanResult(o);
+        db.results = db.results.filter((r) => r.event_id !== eventId);
+        db.results.push({ event_id: eventId, outcome: row.outcome, opponent: row.opponent, score_us: row.score_us, score_them: row.score_them, updated_by: state.user.id, updated_at: new Date().toISOString() });
+        db.resultNotes = db.resultNotes.filter((n) => n.event_id !== eventId);
+        if (row.notes) db.resultNotes.push({ event_id: eventId, notes: row.notes });
+      },
+      async deleteResult(eventId) {
+        if (!isOfficer()) throw new Error('Só oficiais e o líder alteram resultados');
+        db.results = db.results.filter((r) => r.event_id !== eventId);
+        db.resultNotes = db.resultNotes.filter((n) => n.event_id !== eventId);
       },
       async notes() { return isOfficer() ? db.notes.filter((n) => !canActAsDemo(n.member_id)).map((n) => ({ ...n })) : []; },
       async addNote(memberId, body) { db.notes.unshift({ id: db.nextId++, member_id: memberId, author_id: state.user.id, body, created_at: new Date().toISOString() }); },
@@ -1023,6 +1096,7 @@
       { key: 'event_create', label: 'Criar e repetir eventos', approval: true },
       { key: 'event_edit', label: 'Editar eventos', approval: true },
       { key: 'event_delete', label: 'Apagar eventos', approval: true },
+      { key: 'results', label: 'Registrar resultados', desc: 'Vitória ou derrota, clã adversário, placar e observações', approval: true },
     ] },
     { group: 'Times e presença', items: [
       { key: 'teams_build', label: 'Montar e revisar times', desc: 'Formato, sugestão, renomear e salvar os times' },
@@ -1084,6 +1158,17 @@
       if (!ev) throw new Error('O evento não existe mais');
       return ['event_delete', `Apagar o evento “${ev.title}” de ${fmtShortDate(ev.starts_at)}`];
     },
+    saveResult: async (raw, id, o) => {
+      const ev = await raw.event(id);
+      if (!ev) throw new Error('O evento não existe mais');
+      const r = cleanResult(o);
+      return ['results', `Registrar ${r.outcome === 'win' ? 'vitória' : 'derrota'} no evento “${ev.title}” de ${fmtShortDate(ev.starts_at)}${r.opponent ? ` contra ${r.opponent}` : ''}${scoreText(r) ? ` · placar ${scoreText(r)}` : ''}`];
+    },
+    deleteResult: async (raw, id) => {
+      const ev = await raw.event(id);
+      if (!ev) throw new Error('O evento não existe mais');
+      return ['results', `Tirar o resultado do evento “${ev.title}” de ${fmtShortDate(ev.starts_at)}`];
+    },
     saveTeams: () => ['teams_build'],
     renameTeam: () => ['teams_build'],
     removeTeams: () => ['teams_build'],
@@ -1138,6 +1223,8 @@
     closeRecruit: ([id, reopen]) => [Number(id), !!reopen],
     updateRecruit: ([id, row]) => [Number(id), cleanRecruitRow(row)],
     deleteRecruit: ([id]) => [Number(id)],
+    saveResult: ([id, o]) => [Number(id), cleanResult(o)],
+    deleteResult: ([id]) => [Number(id)],
   };
   let RAW = null; // operações sem a checagem de permissão (o líder usa ao aprovar)
   function withPermissions(raw) {
@@ -1731,6 +1818,12 @@
     </div>`;
   }
 
+  // Selo do resultado na lista de eventos
+  function resultBadge(r) {
+    const win = r.outcome === 'win';
+    const sc = scoreText(r);
+    return `<div class="res-line ${win ? 'win' : 'loss'}">${win ? '🏆' : '💀'} <b>${win ? 'Vitória' : 'Derrota'}</b>${r.opponent ? ` contra <b>${esc(r.opponent)}</b>` : ''}${sc ? ` <span class="res-sc">${sc}</span>` : ''}</div>`;
+  }
   function eventCard(ev) {
     const c = counts(ev);
     const rel = relativeDay(ev.starts_at);
@@ -1748,10 +1841,11 @@
         ${isOfficer() && ev.rsvps.some((r) => r.going && r.withdraw_requested_at) ? `<span class="badge warn">⚠ ${ev.rsvps.filter((r) => r.going && r.withdraw_requested_at).length} pedido(s) de saída</span>` : ''}
         ${deadlineTag(ev) ? `<div>${deadlineTag(ev)}</div>` : ''}
         ${needsAttendance ? '<span class="badge warn">Registrar presença</span>' : ''}
+        ${ev.result ? resultBadge(ev.result) : ''}
         ${ev.description ? `<div class="desc">${esc(ev.description)}</div>` : ''}
         ${isOfficer() ? `<div class="counts"><span class="c-yes">✔ ${c.yes} vão</span><span class="c-no">✖ ${c.no} não vão</span><span class="muted">${c.pending} sem resposta</span></div>
         <div class="bar"><span class="y" style="width:${pct(c.yes)}%"></span><span class="n" style="width:${pct(c.no)}%"></span></div>` : ''}
-        <div class="ev-foot"><a class="btn small ghost" href="#/evento/${ev.id}">🔎 Detalhar evento</a>${calBtn(ev)}</div>
+        <div class="ev-foot"><a class="btn small ghost" href="#/evento/${ev.id}">🔎 Detalhar evento</a>${calBtn(ev)}${can('results') && hasStarted(ev) ? `<button class="btn small ${ev.result ? 'ghost' : 'primary'}" type="button" data-result="${ev.id}">${ev.result ? '✏️ Editar resultado' : '🏆 Registrar resultado'}</button>` : ''}</div>
       </div>
       ${isOpen(ev) ? rsvpButtons(ev) : ''}
     </div>`;
@@ -1936,6 +2030,11 @@
   async function viewEvents(past) {
     loading();
     const events = await api.events(past);
+    // Resultado das guerras: só para eventos que já começaram
+    const started = events.filter(hasStarted).map((e) => e.id);
+    const results = started.length ? await api.eventResults(started).catch(() => []) : [];
+    const resBy = Object.fromEntries(results.map((r) => [r.event_id, r]));
+    events.forEach((e) => { e.result = resBy[e.id] || null; });
     const head = `<div class="page-head"><h1>${past ? 'Eventos passados' : 'Próximos eventos'}</h1>
       ${can('event_create') && !past ? '<button class="btn primary" id="btn-new">+ Novo evento</button>' : ''}</div>`;
     const body = events.length
@@ -1943,6 +2042,10 @@
       : `<div class="card empty">${past ? 'Nenhum evento passado ainda.' : 'Nenhum evento agendado.'}${can('event_create') && !past ? '<br><br>Crie o primeiro em “+ Novo evento”.' : ''}</div>`;
     main.innerHTML = head + body;
     $('#btn-new')?.addEventListener('click', () => openEventForm());
+    main.querySelectorAll('[data-result]').forEach((b) => b.addEventListener('click', () => {
+      const ev = events.find((e) => e.id === Number(b.dataset.result));
+      if (ev) openResultDialog(ev, ev.result, () => viewEvents(past));
+    }));
     bindRsvp(main, events, () => viewEvents(past));
   }
 
@@ -2027,9 +2130,91 @@
 
   // ---------- Detalhe do evento ----------
 
+  // Resultado da guerra na página do evento (todos veem; observações só a liderança)
+  function resultCard(ev, r) {
+    const canEdit = can('results') && hasStarted(ev);
+    if (!r) {
+      return canEdit ? `<div class="card result-card empty-res row">
+          <span>⚔ Como foi? Registre o resultado deste evento.</span>
+          <span class="spacer"></span><button class="btn small primary" id="btn-result">🏆 Registrar resultado</button></div>` : '';
+    }
+    const win = r.outcome === 'win';
+    const hasScore = r.score_us != null || r.score_them != null;
+    return `<div class="card result-card ${win ? 'win' : 'loss'}">
+        <div class="row">
+          <span class="res-icon" aria-hidden="true">${win ? '🏆' : '💀'}</span>
+          <div class="spacer">
+            <div class="res-title"><b>${win ? 'Vitória' : 'Derrota'}</b>${r.opponent ? ` <span class="muted">contra</span> <b>${esc(r.opponent)}</b>` : ''}</div>
+            ${hasScore ? `<div class="res-score"><span>INFERNUM</span> <b>${r.score_us ?? '–'}</b> <span class="muted">×</span> <b>${r.score_them ?? '–'}</b> <span>${esc(r.opponent || 'Adversário')}</span></div>` : ''}
+          </div>
+          ${canEdit ? '<button class="btn small" id="btn-result">Editar resultado</button>' : ''}
+        </div>
+        ${isOfficer() && r.notes ? `<div class="res-notes"><span class="muted small">📝 Observações · só a liderança vê</span><div style="white-space:pre-line">${esc(r.notes)}</div></div>` : ''}
+      </div>`;
+  }
+
+  async function openResultDialog(ev, r, reload) {
+    const names = await api.opponents().catch(() => []);
+    const outcome = r?.outcome || '';
+    openDialog(`
+      <form id="res-form" class="stack">
+        <h2>🏆 Resultado · ${esc(ev.title)}</h2>
+        <p class="muted small" style="margin:0">${esc(fmtDay(ev.starts_at))} · ${fmtTime(ev.starts_at)}</p>
+        <div class="seg res-outcome" role="radiogroup" aria-label="Resultado">
+          <label class="${outcome === 'win' ? 'on' : ''}"><input type="radio" name="res-out" value="win" ${outcome === 'win' ? 'checked' : ''}> 🏆 Vitória</label>
+          <label class="${outcome === 'loss' ? 'on' : ''}"><input type="radio" name="res-out" value="loss" ${outcome === 'loss' ? 'checked' : ''}> 💀 Derrota</label>
+        </div>
+        <div class="field">
+          <label for="res-opp">Clã adversário <span class="muted small">(opcional)</span></label>
+          <input id="res-opp" maxlength="60" list="res-opp-list" value="${esc(r?.opponent || '')}" placeholder="Nome do clã" autocomplete="off">
+          <datalist id="res-opp-list">${names.map((n) => `<option value="${esc(n)}">`).join('')}</datalist>
+        </div>
+        <div class="field">
+          <label>Placar <span class="muted small">(opcional)</span></label>
+          <div class="row res-score-in">
+            <input type="number" id="res-us" min="0" step="1" inputmode="numeric" placeholder="Nós" aria-label="Pontos do INFERNUM" value="${r?.score_us ?? ''}">
+            <span class="muted">×</span>
+            <input type="number" id="res-them" min="0" step="1" inputmode="numeric" placeholder="Eles" aria-label="Pontos do adversário" value="${r?.score_them ?? ''}">
+          </div>
+        </div>
+        <div class="field">
+          <label for="res-notes">Observações <span class="muted small">(opcional; só a liderança vê)</span></label>
+          <textarea id="res-notes" maxlength="1000" placeholder="O que funcionou, o que melhorar…">${esc(r?.notes || '')}</textarea>
+        </div>
+        <p class="le-msg small bad" id="res-msg" hidden></p>
+        <div class="row end">
+          ${r ? '<button type="button" class="btn ghost danger" id="res-del">Tirar resultado</button><span class="spacer"></span>' : ''}
+          <button type="button" class="btn ghost" data-close>Cancelar</button>
+          <button type="submit" class="btn primary">Salvar</button>
+        </div>
+      </form>`, (d) => {
+      const msg = (t) => { const m = $('#res-msg', d); m.hidden = !t; m.textContent = t || ''; };
+      d.querySelectorAll('input[name=res-out]').forEach((i) => i.addEventListener('change', () => {
+        d.querySelectorAll('.res-outcome label').forEach((l) => l.classList.toggle('on', l.querySelector('input').checked));
+      }));
+      $('#res-form', d).addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const out = d.querySelector('input[name=res-out]:checked')?.value;
+        if (!out) { msg('Escolha Vitória ou Derrota.'); return; }
+        const us = $('#res-us', d).value; const them = $('#res-them', d).value;
+        if ([us, them].some((v) => v !== '' && !(Number(v) >= 0 && Number.isInteger(Number(v))))) { msg('O placar precisa ser um número inteiro (0 ou mais).'); return; }
+        const b = $('button[type=submit]', d); b.disabled = true; msg('');
+        try {
+          await api.saveResult(ev.id, { outcome: out, opponent: $('#res-opp', d).value, score_us: us, score_them: them, notes: $('#res-notes', d).value });
+          dlg.close(); toast('Resultado salvo'); await reload();
+        } catch (err) { b.disabled = false; if (err instanceof PendingApproval) fail(err); else msg(err?.message || String(err)); }
+      });
+      $('#res-del', d)?.addEventListener('click', async () => {
+        dlg.close();
+        if (!(await confirmDialog('Tirar o resultado deste evento? As observações também saem.', 'Tirar resultado'))) return;
+        try { await api.deleteResult(ev.id); toast('Resultado removido'); await reload(); } catch (err) { fail(err); }
+      });
+    });
+  }
+
   async function viewEvent(id) {
     loading();
-    const ev = await api.event(id);
+    const [ev, result] = await Promise.all([api.event(id), api.eventResult(id).catch(() => null)]);
     if (!ev) { main.innerHTML = '<div class="card empty">Evento não encontrado (talvez tenha sido apagado).<br><br><a href="#/">Voltar</a></div>'; return; }
     const byId = Object.fromEntries(state.members.map((m) => [m.id, m]));
     const sortX = (a, b) => byName(a.p, b.p);
@@ -2086,6 +2271,7 @@
       </div>` : '';
 
     const finished = !isOpen(ev);
+    const resultBox = resultCard(ev, result);
     main.innerHTML = `
       <p><a href="${finished ? '#/passados' : '#/'}" class="small">← Voltar${finished ? ' aos eventos passados' : ''}</a></p>
       <div class="card stack">
@@ -2108,6 +2294,7 @@
             ${can('event_delete') ? '<button class="btn small danger" id="btn-del">Apagar</button>' : ''}` : ''}
         </div>
       </div>
+      ${resultBox}
       ${wdBox}
       ${myTeam(ev) ? `<div class="card my-team row">
           <span class="my-team-icon" aria-hidden="true">🛡</span>
@@ -2153,6 +2340,7 @@
       main.querySelectorAll('[data-agg]').forEach((x) => x.classList.toggle('on', x.dataset.agg === aggMode()));
     }));
     $('#btn-attend')?.addEventListener('click', () => openAttendanceDialog(ev, () => viewEvent(id)));
+    $('#btn-result')?.addEventListener('click', () => openResultDialog(ev, result, () => viewEvent(id)));
     if (isOfficer()) {
       $('#btn-copy-list').addEventListener('click', () => {
         const names = (arr) => arr.map((x) => displayName(x.p)).join(', ') || '—';
