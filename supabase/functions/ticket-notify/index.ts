@@ -1,5 +1,7 @@
-// Edge Function "ticket-notify" — DM no Discord para quem abriu o ticket.
-// Chamada pelos gatilhos de supabase/notificacoes_discord.sql com { id } do aviso.
+// Edge Function "ticket-notify" — DMs do bot do INFERNUM no Discord.
+//  • Tickets: chamada pelos gatilhos de supabase/notificacoes_discord.sql com { id } do aviso.
+//  • Acesso ao site (aprovado, readmitido, recusado): supabase/notificacoes_membros.sql,
+//    com { id, type: 'member' }.
 //
 // Publicar: Supabase → Edge Functions → Deploy a new function → Via Editor,
 // nome "ticket-notify", cole este arquivo e publique.
@@ -22,6 +24,14 @@ function message(n) {
   return `✅ **INFERNUM** · Seu ticket ${title} foi encerrado como resolvido. Se ainda precisar de ajuda, é só responder por lá.\n👉 ${link}`;
 }
 
+function memberMessage(n) {
+  if (n.kind === 'approved') return `🔥 **INFERNUM** · Seu acesso ao site do clã foi aprovado! Bem-vindo ao INFERNUM.
+👉 ${SITE}`;
+  if (n.kind === 'readmitted') return `🔥 **INFERNUM** · Seu retorno ao clã foi aprovado! Bem-vindo de volta ao INFERNUM.
+👉 ${SITE}`;
+  return '**INFERNUM** · Seu pedido de acesso ao site do clã não foi aprovado. Em caso de dúvida, fale com a liderança no Discord.';
+}
+
 async function discord(path, body, token) {
   const r = await fetch(`${DISCORD}${path}`, {
     method: 'POST',
@@ -35,23 +45,27 @@ async function discord(path, body, token) {
 
 Deno.serve(async (req) => {
   if (req.method !== 'POST') return new Response('ok');
-  const { id } = await req.json().catch(() => ({}));
+  const { id, type } = await req.json().catch(() => ({}));
+  const member = type === 'member';
   if (!Number.isInteger(id)) return new Response('id inválido', { status: 400 });
 
   const sb = createClient(Deno.env.get('SUPABASE_URL'), Deno.env.get('SUPABASE_SERVICE_ROLE_KEY'));
   // Só avisos pendentes são enviados, e uma única vez (chamadas repetidas não fazem nada)
-  const { data: n, error } = await sb.rpc('claim_ticket_notification', { p_id: id });
+  const { data: n, error } = await sb.rpc(member ? 'claim_member_notification' : 'claim_ticket_notification', { p_id: id });
   if (error) return new Response(error.message, { status: 500 });
   if (!n) return new Response('nada a enviar');
 
-  const fail = async (msg) => { await sb.rpc('fail_ticket_notification', { p_id: id, p_error: msg }); return new Response(msg, { status: 200 }); };
+  const fail = async (msg) => {
+    await sb.rpc(member ? 'fail_member_notification' : 'fail_ticket_notification', { p_id: id, p_error: msg });
+    return new Response(msg, { status: 200 });
+  };
   const token = Deno.env.get('DISCORD_BOT_TOKEN');
   if (!token) return fail('Segredo DISCORD_BOT_TOKEN não cadastrado');
-  if (!n.discord_id) return fail('O autor não entrou com o Discord');
+  if (!n.discord_id) return fail(member ? 'A conta não entrou com o Discord' : 'O autor não entrou com o Discord');
 
   try {
     const dm = await discord('/users/@me/channels', { recipient_id: n.discord_id }, token);
-    await discord(`/channels/${dm.id}/messages`, { content: message(n), allowed_mentions: { parse: [] } }, token);
+    await discord(`/channels/${dm.id}/messages`, { content: member ? memberMessage(n) : message(n), allowed_mentions: { parse: [] } }, token);
     return new Response('enviado');
   } catch (e) {
     return fail(String(e?.message || e));
