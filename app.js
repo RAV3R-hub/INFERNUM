@@ -104,6 +104,11 @@
     return c.slice(0, 2).join('') + '*'.repeat(c.length - 3) + c[c.length - 1];
   }).join(' ');
 
+  // Datas "AAAA-MM-DD" no horário do aparelho (o clã joga no horário de Brasília)
+  const localDay = (d = new Date()) => new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 10);
+  const fmtDay2 = (s) => (s ? s.split('-').reverse().slice(0, 2).join('/') : '');
+  const fmtDay3 = (s) => (s ? s.split('-').reverse().join('/') : '');
+
   // O que o membro comum recebe do perfil dos outros (igual à visão "member_directory" do banco)
   const directoryRow = (p) => ({
     id: p.id, discord_name: p.discord_name, game_name: p.game_name, role: p.role, managed: !!p.managed,
@@ -161,6 +166,10 @@
       async profileHistory() { return ok(await sb.from('profile_history').select('*').order('changed_at', { ascending: false }).limit(5000)); },
       // Medalhas de todos os membros ativos (o banco calcula; a frequência detalhada continua privada)
       async badges() { return ok(await sb.rpc('member_badges')) || []; },
+      // Ausências: a pessoa, quem pilota a conta e a liderança veem (com o motivo)
+      async absences() { return ok(await sb.from('absences').select('*').order('starts_on', { ascending: false }).limit(500)); },
+      async saveAbsence(userId, start, end, reason) { return ok(await sb.rpc('save_absence', { p_user: userId, p_start: start, p_end: end, p_reason: reason })); },
+      async deleteAbsence(id) { ok(await sb.rpc('delete_absence', { p_id: id })); },
       async saveProfile(fields, phone) {
         ok(await sb.from('profiles').update(fields).eq('id', state.user.id));
         if (phone !== undefined) ok(await sb.from('member_contacts').upsert({ user_id: state.user.id, phone: phone || null }));
@@ -366,6 +375,7 @@
       slots: [],
       attendance: [],
       history: [],
+      absences: [],
       nextId: 100,
     };
     const profile = (id) => db.profiles.find((p) => p.id === id);
@@ -573,6 +583,22 @@
       };
     };
     const dropSlot = (eventId, userId) => { db.slots = db.slots.filter((s) => !(s.event_id === eventId && s.user_id === userId)); };
+    // Ausência: eventos futuros do período viram "Não vou" (igual à função apply_absence do banco)
+    const absenceCovers = (a, ev) => { const d = localDay(new Date(ev.starts_at)); return d >= a.starts_on && d <= a.ends_on; };
+    function applyAbsenceDemo(a, events = db.events) {
+      let n = 0;
+      events.filter((e) => Date.parse(e.starts_at) > Date.now() && absenceCovers(a, e)).forEach((e) => {
+        const r = db.rsvps.find((x) => x.event_id === e.id && x.user_id === a.user_id);
+        if (!r) { db.rsvps.push({ event_id: e.id, user_id: a.user_id, going: false, absence_id: a.id }); n++; }
+        else if (r.going) { Object.assign(r, { going: false, discord: null, absence_id: a.id, withdraw_reason: null, withdraw_requested_at: null }); dropSlot(e.id, a.user_id); n++; }
+      });
+      return n;
+    }
+    // Exemplo: Trovão está viajando
+    {
+      const a = { id: db.nextId++, user_id: 'u5', starts_on: localDay(new Date(Date.now() - 2 * 86400000)), ends_on: localDay(new Date(Date.now() + 9 * 86400000)), reason: 'Viagem a trabalho, sem internet boa', created_by: 'u5', created_at: new Date().toISOString() };
+      db.absences.push(a); applyAbsenceDemo(a);
+    }
     let user = null;
     let listener = () => {};
     let demoSignup = null;
@@ -640,7 +666,9 @@
         return db.profiles.filter((p) => ACTIVE_ROLES.includes(p.role)).map((p) => {
           const joined = Date.parse(p.created_at || 0) || 0;
           const hist = reg.filter((e) => Date.parse(e.starts_at) >= joined)
-            .map((e) => ({ t: Date.parse(e.starts_at), was: db.attendance.some((a) => a.event_id === e.id && a.user_id === p.id && a.present) }));
+            .map((e) => ({ e, t: Date.parse(e.starts_at), was: db.attendance.some((a) => a.event_id === e.id && a.user_id === p.id && a.present) }))
+            // ausência programada (sem presença) não conta como falta
+            .filter((h) => h.was || !db.rsvps.some((r) => r.event_id === h.e.id && r.user_id === p.id && r.absence_id));
           let streak = 0;
           for (const h of hist) { if (h.was) streak++; else break; }
           const months = {};
@@ -657,7 +685,35 @@
           .sort((a, b) => Date.parse(b.starts_at) - Date.parse(a.starts_at)).map(attach);
       },
       async createEvents(rows) {
-        return rows.map((r) => { const e = { id: db.nextId++, team_format: null, team_count: 10, ...r }; db.events.push(e); return { id: e.id }; });
+        return rows.map((r) => {
+          const e = { id: db.nextId++, team_format: null, team_count: 10, ...r }; db.events.push(e);
+          db.absences.forEach((a) => applyAbsenceDemo(a, [e]));
+          return { id: e.id };
+        });
+      },
+      async absences() { return db.absences.filter((a) => isOfficer() || canActAsDemo(a.user_id)).map((a) => ({ ...a })); },
+      async saveAbsence(userId, start, end, reason) {
+        if (!(canActAsDemo(userId) || isOfficer())) throw new Error('Você não pode programar ausência para esta conta');
+        if (!start || !end || end < start) throw new Error('Confira as datas da ausência');
+        if (start < localDay()) throw new Error('A ausência não pode começar antes de hoje');
+        if ((Date.parse(end) - Date.parse(start)) / 86400000 > 180) throw new Error('A ausência pode ter no máximo 180 dias');
+        if (!String(reason || '').trim()) throw new Error('Informe o motivo da ausência');
+        if (db.absences.some((a) => a.user_id === userId && a.starts_on <= end && a.ends_on >= start)) throw new Error('Já existe uma ausência neste período');
+        const a = { id: db.nextId++, user_id: userId, starts_on: start, ends_on: end, reason: String(reason).trim().slice(0, 300), created_by: state.user.id, created_at: new Date().toISOString() };
+        db.absences.push(a);
+        return { id: a.id, changed: applyAbsenceDemo(a) };
+      },
+      async deleteAbsence(id) {
+        const a = db.absences.find((x) => x.id === id);
+        if (!a) return;
+        if (!(canActAsDemo(a.user_id) || isOfficer())) throw new Error('Sem permissão para cancelar esta ausência');
+        const today = localDay();
+        const ongoing = a.starts_on <= today;
+        // Encerrar: libera os eventos depois de hoje. Cancelar (ainda não começou): libera todos.
+        const freed = new Set(db.events.filter((e) => Date.parse(e.starts_at) > Date.now() && (!ongoing || localDay(new Date(e.starts_at)) > today)).map((e) => e.id));
+        db.rsvps = db.rsvps.filter((r) => !(r.absence_id === id && !r.going && freed.has(r.event_id)));
+        if (ongoing) a.ends_on = today;
+        else db.absences = db.absences.filter((x) => x.id !== id);
       },
       async notes() { return isOfficer() ? db.notes.filter((n) => !canActAsDemo(n.member_id)).map((n) => ({ ...n })) : []; },
       async addNote(memberId, body) { db.notes.unshift({ id: db.nextId++, member_id: memberId, author_id: state.user.id, body, created_at: new Date().toISOString() }); },
@@ -733,6 +789,7 @@
         let r = db.rsvps.find((x) => x.event_id === eventId && x.user_id === acct);
         if (!r) { r = { event_id: eventId, user_id: acct }; db.rsvps.push(r); }
         Object.assign(r, { going, answered_by: state.user.id }, build || {});
+        if (going) r.absence_id = null;
         if (!going) dropSlot(eventId, acct);
       },
       async clearRsvp(eventId, accountId) {
@@ -1648,6 +1705,13 @@
   }
 
   function rsvpButtons(ev) {
+    const html = rsvpButtonsRaw(ev);
+    const mine = myRsvp(ev);
+    // aviso dentro do mesmo bloco dos botões
+    return mine && !mine.going && mine.absence_id
+      ? html.replace(/<\/div>\s*$/, '<div class="abs-note" title="Você pode trocar para “Vou” se for participar">✈️ Ausência programada</div></div>') : html;
+  }
+  function rsvpButtonsRaw(ev) {
     const mine = myRsvp(ev);
     if (!canChangeRsvp(ev)) {
       const why = !rsvpOpen(ev) ? 'Respostas encerradas' : '🔒 Times travados';
@@ -1925,7 +1989,8 @@
       ? `<ul class="people">${arr.map((x) => {
         // Quando um piloto respondeu pela conta, mostra quem foi
         const by = x.r?.answered_by && x.r.answered_by !== x.p.id ? memberById(x.r.answered_by) : null;
-        return personLine(x.p, withClass ? buildFor(x.r, x.p) : null, withClass && x.r?.discord, by ? `respondido por ${displayName(by)}` : '');
+        const note = x.r?.absence_id && !x.r.going ? '✈️ ausência programada' : by ? `respondido por ${displayName(by)}` : '';
+        return personLine(x.p, withClass ? buildFor(x.r, x.p) : null, withClass && x.r?.discord, note);
       }).join('')}</ul>`
       : '<p class="muted small">Ninguém</p>');
 
@@ -2135,6 +2200,7 @@
         if (!ev.attendance.length || Date.parse(ev.starts_at) < joined) return;
         const was = ev.attendance.some((a) => a.user_id === m.id && a.present);
         const r = ev.rsvps.find((x) => x.user_id === m.id);
+        if (r?.absence_id && !was) return; // ausência programada: fica fora da frequência
         row.total++;
         if (was) { row.present++; if (!row.last) row.last = ev.starts_at; }
         if (r?.going) row.confirmed++;
@@ -3515,10 +3581,11 @@
     loading();
     const since = P.days ? new Date(Date.now() - P.days * 86400000).toISOString() : null;
     const showNotes = !self && can('notes') && !canActAs(targetId);
-    const [members, past, upcoming, changes, allNotes, mlog, pilots] = await Promise.all([
+    const [members, past, upcoming, changes, allNotes, mlog, pilots, absences] = await Promise.all([
       api.members(), api.history(since), api.events(false), api.profileHistory(), showNotes ? api.notes() : Promise.resolve([]),
       api.membershipLog(targetId).catch(() => []), // se o banco ainda não tiver o histórico, mostra vazio
       api.pilots().catch(() => state.pilots || []),
+      api.absences().catch(() => null), // null = o SQL das ausências ainda não foi rodado
     ]);
     state.pilots = pilots;
     state.members = members;
@@ -3646,6 +3713,7 @@
           <h2>Histórico de alterações</h2>
           <div class="hist">${histItemsHtml(myChanges) || '<p class="muted">Nenhuma alteração registrada ainda.</p>'}</div>
         </div>
+        ${absences && ACTIVE_ROLES.includes(me.role) && (canActAs(me.id) || isOfficer()) ? absencesCard(me, absences) : ''}
       </div>
       ${pilotsCard(me, self)}
       ${membershipCard(mlog.filter((h) => h.user_id === me.id), members)}
@@ -3657,6 +3725,7 @@
     $('#btn-pr-info')?.addEventListener('click', () => openPowerInfo(me));
     bindEvo(me, myChanges, self);
     bindPilotsCard(me, () => viewMyPanel(userId));
+    bindAbsences(me, absences || [], () => viewMyPanel(userId));
     $('#p-days').addEventListener('change', (e) => { P.days = Number(e.target.value); viewMyPanel(userId); });
 
     // Anotações internas
@@ -3829,6 +3898,82 @@
   }
 
   // ---------- Contas pilotadas no perfil ----------
+
+  // ---------- Ausência programada ----------
+  function absencesCard(account, list) {
+    const today = localDay();
+    const mineOnly = list.filter((a) => a.user_id === account.id);
+    const open = mineOnly.filter((a) => a.ends_on >= today).sort((a, b) => a.starts_on.localeCompare(b.starts_on));
+    const past = mineOnly.filter((a) => a.ends_on < today).sort((a, b) => b.starts_on.localeCompare(a.starts_on)).slice(0, 5);
+    const own = account.id === state.user.id;
+    const row = (a, live) => {
+      const now = a.starts_on <= today && a.ends_on >= today;
+      const by = a.created_by && a.created_by !== account.id ? ` · registrada por ${esc(nameOf(a.created_by))}` : '';
+      return `<div class="abs-row${now ? ' now' : ''}">
+        <div class="spacer"><b>✈️ ${esc(fmtDay3(a.starts_on))} a ${esc(fmtDay3(a.ends_on))}</b> ${now ? `<span class="badge warn">${a.ends_on === today ? 'termina hoje' : 'em andamento'}</span>` : live ? '<span class="badge">programada</span>' : ''}
+          <div class="muted small">“${esc(a.reason || '')}”${by}</div></div>
+        ${live && !(now && a.ends_on === today) ? `<button class="btn small ghost danger" data-abs-del="${a.id}">${now ? 'Encerrar' : 'Cancelar'}</button>` : ''}
+      </div>`;
+    };
+    return `<div class="card abs-card">
+      <div class="row"><h2 class="spacer" style="margin:0">✈️ Ausências</h2><button class="btn small" id="btn-abs-new" type="button">Programar ausência</button></div>
+      <p class="muted small">Os eventos do período ficam “Não vou” e não contam como falta. Motivo visível só para ${own ? 'você' : 'a conta'} e a liderança.</p>
+      ${open.length ? open.map((a) => row(a, true)).join('') : '<p class="muted small" style="margin:0">Nenhuma ausência programada.</p>'}
+      ${past.length ? `<details class="abs-past"><summary class="small">Ausências anteriores</summary>${past.map((a) => row(a, false)).join('')}</details>` : ''}
+    </div>`;
+  }
+
+  function bindAbsences(account, list, reload) {
+    $('#btn-abs-new')?.addEventListener('click', () => {
+      const today = localDay();
+      const week = localDay(new Date(Date.now() + 6 * 86400000));
+      openDialog(`
+        <form id="abs-form" class="stack">
+          <h2>✈️ Programar ausência${account.id === state.user.id ? '' : ` · ${esc(displayName(account))}`}</h2>
+          <p class="muted small" style="margin:0">Todos os eventos do período ficam “Não vou” e não contam como falta. Se já tiver confirmado “Vou” em algum, ele também muda (enquanto o prazo estiver aberto).</p>
+          <div class="row" style="gap:12px">
+            <div class="field spacer"><label for="abs-start">De</label><input type="date" id="abs-start" required min="${today}" value="${today}"></div>
+            <div class="field spacer"><label for="abs-end">Até</label><input type="date" id="abs-end" required min="${today}" value="${week}"></div>
+          </div>
+          <div class="field">
+            <label for="abs-reason">Motivo <span class="muted small">(obrigatório; só você e a liderança veem)</span></label>
+            <textarea id="abs-reason" maxlength="300" required placeholder="Ex.: viagem, trabalho, sem internet…"></textarea>
+          </div>
+          <p class="le-msg small bad" id="abs-msg" hidden></p>
+          <div class="row end">
+            <button type="button" class="btn ghost" data-close>Cancelar</button>
+            <button type="submit" class="btn primary">Programar</button>
+          </div>
+        </form>`, (d) => {
+        const msg = (t) => { const m = $('#abs-msg', d); m.hidden = !t; m.textContent = t || ''; };
+        $('#abs-start', d).addEventListener('change', (e) => { const end = $('#abs-end', d); end.min = e.target.value; if (end.value < e.target.value) end.value = e.target.value; });
+        $('#abs-form', d).addEventListener('submit', async (e) => {
+          e.preventDefault();
+          const start = $('#abs-start', d).value; const end = $('#abs-end', d).value; const reason = $('#abs-reason', d).value.trim();
+          if (!start || !end) { msg('Informe as duas datas.'); return; }
+          if (end < start) { msg('A data final precisa ser depois da inicial.'); return; }
+          if (!reason) { msg('Informe o motivo da ausência.'); $('#abs-reason', d).focus(); return; }
+          const b = $('button[type=submit]', d); b.disabled = true; msg('');
+          try {
+            const r = await api.saveAbsence(account.id, start, end, reason);
+            dlg.close();
+            const n = r?.changed || 0;
+            toast(`Ausência programada${n ? ` · ${n} ${n === 1 ? 'evento marcado' : 'eventos marcados'} como “Não vou”` : ''}`);
+            await reload();
+          } catch (err) { msg(err?.message || String(err)); b.disabled = false; }
+        });
+      });
+    });
+    document.querySelectorAll('[data-abs-del]').forEach((btn) => btn.addEventListener('click', async () => {
+      const a = list.find((x) => x.id === Number(btn.dataset.absDel));
+      if (!a) return;
+      const now = a.starts_on <= localDay();
+      if (!(await confirmDialog(now
+        ? 'Encerrar esta ausência hoje? A data final passa a ser hoje e os eventos dos próximos dias voltam a ficar sem resposta.'
+        : 'Cancelar esta ausência? Os eventos do período voltam a ficar sem resposta.', now ? 'Encerrar' : 'Cancelar ausência'))) return;
+      try { await api.deleteAbsence(a.id); toast(now ? 'Ausência encerrada' : 'Ausência cancelada'); await reload(); } catch (err) { fail(err); }
+    }));
+  }
 
   function pilotsCard(account, self) {
     const me = state.user.id;
@@ -4414,6 +4559,17 @@
     if (isOfficer()) (await api.profileHistory()).forEach((h) => { (histBy[h.user_id] ||= []).push(h); });
     const noteCount = {};
     if (can('notes')) (await api.notes()).forEach((n) => { noteCount[n.member_id] = (noteCount[n.member_id] || 0) + 1; });
+    // Ausência atual ou a próxima de cada membro (o motivo aparece ao passar o mouse)
+    const today = localDay();
+    const absBy = {};
+    (await api.absences().catch(() => [])).filter((a) => a.ends_on >= today)
+      .sort((a, b) => a.starts_on.localeCompare(b.starts_on)).forEach((a) => { absBy[a.user_id] ||= a; });
+    const absTag = (m) => {
+      const a = absBy[m.id];
+      if (!a) return '';
+      const txt = a.starts_on <= today ? `ausente até ${fmtDay2(a.ends_on)}` : `ausente de ${fmtDay2(a.starts_on)} a ${fmtDay2(a.ends_on)}`;
+      return `<span class="abs-tag" title="${esc(`Motivo: ${a.reason || ''}`)}">✈️ ${txt}</span>`;
+    };
     const noteBadge = (m) => (noteCount[m.id] ? `<span class="note-badge" title="${noteCount[m.id]} anotação(ões) interna(s)">📝 ${noteCount[m.id]}</span>` : '');
     const oldNames = (id) => (histBy[id] || []).flatMap((h) => ['game_name', 'discord_name'].map((f) => h.changes?.[f]?.[0])).filter(Boolean);
     const sorted = [...state.members].sort((a, b) => (ROLE_ORDER[a.role] - ROLE_ORDER[b.role]) || byName(a, b));
@@ -4452,7 +4608,7 @@
     const histBtn = (m) => (histBy[m.id]?.length
       ? `<button class="btn small ghost" data-history="${esc(m.id)}" title="Ver histórico de alterações">🕘 ${histBy[m.id].length}</button>` : '');
     const row = (m, ctrl) => `<div class="member clickable" data-search="${esc(searchText(m))}" data-profile="${esc(m.id)}" title="Abrir o perfil de ${esc(displayName(m))}">${avatar(m, 'lg')}
-      <div class="name"><a class="member-link" href="#/membro/${encodeURIComponent(m.id)}">${esc(displayName(m))}</a>${medalsHtml(m.id)} ${noteBadge(m)} ${pilotLabel(m)} ${formerly(m)}
+      <div class="name"><a class="member-link" href="#/membro/${encodeURIComponent(m.id)}">${esc(displayName(m))}</a>${medalsHtml(m.id)} ${absTag(m)} ${noteBadge(m)} ${pilotLabel(m)} ${formerly(m)}
         <small>${m.managed ? 'conta sem login' : (m.game_name ? esc(m.discord_name) : '')} ${phoneLink(m)}</small>
         ${m.char_class ? `<div class="member-build">${classTag(m.char_class)} <span>${esc(CLASS[m.char_class].label)}</span><span class="chip-stats">${statsLine(m)}</span></div>` : '<div class="member-build muted small">Classe e atributos não informados</div>'}
       </div>${histBtn(m)}${ctrl}</div>`;
