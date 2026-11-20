@@ -937,3 +937,13 @@ body.has-fab main { padding-bottom: 90px; }
 .cmp-legend { flex-wrap: wrap; row-gap: 4px; }
 .cmp-legend span { display: inline-flex; align-items: center; gap: 5px; }
 .cmp-legend span:first-child { flex: none; }
+
+/* ---------- Evolução do personagem ---------- */
+.evo-card { margin-top: 12px; }
+.evo-tabs { display: flex; flex-wrap: wrap; gap: 6px; margin: 4px 0 12px; }
+.evo-tab { background: transparent; border: 1px solid var(--border); color: var(--muted); border-radius: 999px; padding: 5px 12px; font: inherit; font-size: .85rem; cursor: pointer; }
+.evo-tab:hover { color: var(--text); border-color: var(--gold); }
+.evo-tab[aria-selected="true"] { background: var(--ember); border-color: var(--ember); color: #fff; }
+.evo-sum { display: flex; align-items: center; gap: 12px; margin-bottom: 8px; }
+.evo-gain { font-family: "Cinzel", serif; font-size: 1.8rem; font-weight: 700; line-height: 1; }
+.evo-empty { margin: 8px 0 4px; }

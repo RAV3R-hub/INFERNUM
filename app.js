@@ -378,7 +378,18 @@
       { id: 3, user_id: 'u5', changed_at: day(-12, 21), changes: { char_class: [u5.char_class === 'dh' ? 'mago' : 'dh', u5.char_class], discord_name: ['trovao_antigo', u5.discord_name] } },
     );
     // Evolução de Ressonância nos últimos meses (alimenta os gráficos de Estatísticas)
-    db.profiles.filter((p) => p.resonance && p.role !== 'pending' && p.id !== 'u2').forEach((p) => {
+    // Sua conta na demonstração: evolução mais completa (alimenta o gráfico "Evolução do personagem")
+    {
+      const me0 = profile('u0');
+      const chain = (key, steps) => {
+        let v = me0[key];
+        steps.forEach(([d, gain]) => { db.history.push({ id: db.history.length + 1, user_id: 'u0', changed_at: day(d, 21), changes: { [key]: [v - gain, v] } }); v -= gain; });
+      };
+      chain('resonance', [[-3, 120], [-14, 210], [-33, 90], [-51, 260], [-78, 180], [-110, 150]]);
+      chain('armor', [[-14, 180], [-51, 320], [-95, 240]]);
+      chain('potency', [[-33, 150]]);
+    }
+    db.profiles.filter((p) => p.resonance && p.role !== 'pending' && p.id !== 'u2' && p.id !== 'u0').forEach((p) => {
       let v = p.resonance;
       for (let k = 1; k <= 3; k++) {
         if (rnd() < 0.3) continue;
@@ -3588,6 +3599,7 @@
       </div>
 
       ${powerRankCard(me, self)}
+      ${evoCard()}
 
       <div class="panels">
         <div class="card">
@@ -3621,6 +3633,7 @@
     $('#btn-edit-pf')?.addEventListener('click', openProfile);
     $('#btn-pr-fill')?.addEventListener('click', openProfile);
     $('#btn-pr-info')?.addEventListener('click', () => openPowerInfo(me));
+    bindEvo(me, myChanges, self);
     bindPilotsCard(me, () => viewMyPanel(userId));
     $('#p-days').addEventListener('change', (e) => { P.days = Number(e.target.value); viewMyPanel(userId); });
 
@@ -3651,6 +3664,62 @@
     })).sort((a, b) => (b.score - a.score) || byName(a.m, b.m));
   }
   const ordinal = (n) => `${n}º`;
+  // ---------- Evolução do personagem ----------
+  // Pontos de um atributo ao longo do tempo, a partir do histórico de alterações do perfil
+  function evoSeries(person, changes, key) {
+    const list = changes.filter((h) => h.changes && h.changes[key])
+      .map((h) => ({ t: Date.parse(h.changed_at), from: h.changes[key][0], to: h.changes[key][1] }))
+      .filter((h) => Number.isFinite(h.t)).sort((a, b) => a.t - b.t);
+    const pts = [];
+    const fmtD = (t) => new Date(t).toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit', year: '2-digit' });
+    // Valor antes da primeira alteração registrada (marcado um dia antes dela)
+    if (list.length && list[0].from != null) {
+      const t = list[0].t - 86400000;
+      pts.push({ t, v: Number(list[0].from), label: fmtD(t), tip: `${fmtD(t)}: ${fmtNum(Number(list[0].from))} (valor inicial)` });
+    }
+    list.forEach((h) => { if (h.to != null) pts.push({ t: h.t, v: Number(h.to), label: fmtD(h.t), tip: `${fmtD(h.t)}: ${fmtNum(Number(h.to))}` }); });
+    // Até hoje, com o valor atual
+    const now = Date.now(); const cur = person[key];
+    if (pts.length && cur != null && now - pts[pts.length - 1].t > 3600e3) pts.push({ t: now, v: Number(cur), label: 'hoje', tip: `Hoje: ${fmtNum(Number(cur))}`, dot: false });
+    return { pts, last: list.length ? list[list.length - 1].t : null };
+  }
+
+  function evoCard() {
+    return `<div class="card evo-card">
+      <h2>📈 Evolução do personagem</h2>
+      <div class="evo-tabs" role="tablist">${ATTRS.slice().sort((a, b) => (a.key === 'resonance' ? -1 : b.key === 'resonance' ? 1 : 0))
+        .map((a) => `<button type="button" class="evo-tab" role="tab" data-evo="${a.key}">${esc(a.label)}</button>`).join('')}</div>
+      <div id="evo-body"></div>
+    </div>`;
+  }
+
+  function bindEvo(person, changes, self) {
+    const body = $('#evo-body');
+    if (!body) return;
+    const show = (key) => {
+      document.querySelectorAll('.evo-tab').forEach((b) => b.setAttribute('aria-selected', String(b.dataset.evo === key)));
+      const attr = ATTRS.find((a) => a.key === key);
+      const { pts, last } = evoSeries(person, changes, key);
+      if (pts.length < 2) {
+        body.innerHTML = `<p class="muted small evo-empty">Ainda não há alterações de ${esc(attr.label)} registradas. O gráfico aparece quando ${self ? 'você atualizar' : 'o perfil for atualizado'} com um valor novo.</p>`;
+        return;
+      }
+      const first = pts[0].v; const cur = pts[pts.length - 1].v; const diff = cur - first;
+      const pct = first ? (diff / first) * 100 : null;
+      const sign = diff > 0 ? '+' : diff < 0 ? '−' : '';
+      const cls = diff > 0 ? 'c-yes' : diff < 0 ? 'c-no' : 'muted';
+      const since = new Date(pts[0].t).toLocaleDateString('pt-BR');
+      body.innerHTML = `<div class="evo-sum">
+          <span class="evo-gain ${cls}">${sign}${fmtNum(Math.abs(diff))}</span>
+          <span class="small">de ${esc(attr.label)} desde ${since}${pct != null && diff ? ` <b class="${cls}">(${sign}${Math.abs(pct).toLocaleString('pt-BR', { maximumFractionDigits: 1 })}%)</b>` : ''}<br>
+          <span class="muted">Agora: <b>${fmtNum(cur)}</b>${last ? ` · última atualização em ${new Date(last).toLocaleDateString('pt-BR')}` : ''}</span></span>
+        </div>
+        ${lineChart(pts, { time: true, aria: `${attr.label} ao longo do tempo` })}`;
+    };
+    document.querySelectorAll('.evo-tab').forEach((b) => b.addEventListener('click', () => show(b.dataset.evo)));
+    show('resonance');
+  }
+
   function powerRankCard(person, self) {
     const rows = powerRanking();
     const mine = rows.findIndex((r) => r.m.id === person.id);
@@ -3972,27 +4041,37 @@
     }).join('')}</div>`;
   }
 
-  function lineChart(points) {
+  // opts.time: posição no eixo X pela data (p.t); opts.aria: descrição; p.tip: texto ao passar o mouse
+  function lineChart(points, opts = {}) {
     const W = 640, H = 210, L = 58, R = 16, T = 16, B = 30;
     const vs = points.map((p) => p.v);
     let lo = Math.min(...vs); let hi = Math.max(...vs);
     if (hi - lo < 20) { lo -= 20; hi += 20; }
     const pad = (hi - lo) * 0.18; const y0 = lo - pad; const y1 = hi + pad;
-    const x = (i) => L + (i * (W - L - R)) / Math.max(1, points.length - 1);
+    const t0 = opts.time ? points[0].t : 0; const tSpan = opts.time ? Math.max(1, points[points.length - 1].t - t0) : 1;
+    const x = opts.time ? (i) => L + ((points[i].t - t0) * (W - L - R)) / tSpan
+      : (i) => L + (i * (W - L - R)) / Math.max(1, points.length - 1);
     const y = (v) => T + (1 - (v - y0) / (y1 - y0)) * (H - T - B);
     const line = points.map((p, i) => `${i ? 'L' : 'M'}${x(i).toFixed(1)},${y(p.v).toFixed(1)}`).join('');
     const area = `${line}L${x(points.length - 1).toFixed(1)},${H - B}L${x(0).toFixed(1)},${H - B}Z`;
     const every = Math.ceil(points.length / 6);
     const last = points.length - 1;
-    return `<svg class="line-chart" viewBox="0 0 ${W} ${H}" role="img" aria-label="Ressonância média ao longo do tempo">
+    // Com datas, só escreve rótulos que não se encostam (o último sempre aparece)
+    const showLabel = new Set();
+    if (opts.time) {
+      let prev = Infinity;
+      for (let i = last; i >= 0; i--) if (prev - x(i) >= 80) { showLabel.add(i); prev = x(i); }
+    }
+    const labelAt = (i) => (opts.time ? showLabel.has(i) : (i === last || (i % every === 0 && last - i >= every)));
+    return `<svg class="line-chart" viewBox="0 0 ${W} ${H}" role="img" aria-label="${esc(opts.aria || 'Ressonância média ao longo do tempo')}">
       <defs><linearGradient id="g-area" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#ff7a2f" stop-opacity=".35"/><stop offset="1" stop-color="#ff7a2f" stop-opacity="0"/></linearGradient></defs>
       ${[lo, (lo + hi) / 2, hi].map((v) => `<line class="grid" x1="${L}" x2="${W - R}" y1="${y(v).toFixed(1)}" y2="${y(v).toFixed(1)}"/>
         <text class="axis" x="${L - 8}" y="${(y(v) + 4).toFixed(1)}" text-anchor="end">${intFmt(v)}</text>`).join('')}
       <path d="${area}" fill="url(#g-area)"/>
       <path class="line" d="${line}"/>
-      ${points.map((p, i) => `<circle class="pt" cx="${x(i).toFixed(1)}" cy="${y(p.v).toFixed(1)}" r="4"><title>${esc(p.label)}: ${intFmt(p.v)} (${p.n} membros)</title></circle>`).join('')}
-      ${points.map((p, i) => (i === last || (i % every === 0 && last - i >= every)
-        ? `<text class="axis" x="${x(i).toFixed(1)}" y="${H - 8}" text-anchor="middle">${esc(p.label)}</text>` : '')).join('')}
+      ${points.map((p, i) => (p.dot === false ? '' : `<circle class="pt" cx="${x(i).toFixed(1)}" cy="${y(p.v).toFixed(1)}" r="4"><title>${esc(p.tip || `${p.label}: ${intFmt(p.v)} (${p.n} membros)`)}</title></circle>`)).join('')}
+      ${points.map((p, i) => (labelAt(i)
+        ? `<text class="axis" x="${x(i).toFixed(1)}" y="${H - 8}" text-anchor="${opts.time && i === last ? 'end' : opts.time && i === 0 ? 'start' : 'middle'}">${esc(p.label)}</text>` : '')).join('')}
     </svg>`;
   }
 
