@@ -5802,17 +5802,17 @@
   // ---------- Utils: links úteis (todos os membros) ----------
 
   const UTIL_LINKS = [
-    { icon: '🎧', title: 'Discord do Clã', desc: 'Servidor do nosso clã no Discord', url: 'https://discord.gg/r4T6hew5' },
-    { icon: '🎧', title: 'Discord da Aliança', desc: 'Servidor da nossa aliança no Discord', url: 'https://discord.gg/YncQxQ4bzB' },
     { icon: '⚔️', title: 'Builds', desc: 'Builds das classes, com itens e gemas recomendados', url: 'https://diablo.tv/builds' },
     { icon: '💎', title: 'Gemas', desc: 'Lista das gemas lendárias e seus efeitos', url: 'https://diablo.tv/legendary-gems' },
     { icon: '🏆', title: 'Rank PvP Mundial', desc: 'Ranking mundial dos jogadores', url: 'https://diablo.tv/leaderboards' },
     { icon: '💬', title: 'Reddit', desc: 'Comunidade r/DiabloImmortal: notícias, dúvidas e discussões', url: 'https://www.reddit.com/r/DiabloImmortal/' },
     { icon: '📜', title: 'Patch Notes NA', desc: 'Notícias e atualizações oficiais da Blizzard (Ocidente)', url: 'https://news.blizzard.com/en-us/feed/diablo-immortal' },
     { icon: '🐉', title: 'Patch Notes CN', desc: 'Notícias do servidor chinês, que recebe as novidades antes', url: 'https://di.blizzard.cn/news/index.html' },
-    { icon: '🗣️', title: 'Fórum Oficial', desc: 'Discussão geral no fórum oficial da Blizzard', url: 'https://us.forums.blizzard.com/en/diablo-immortal/c/general-discussion/5' },
-    { icon: '🧮', title: 'Calculadora de Gemas', desc: 'Calcula a Ressonância das suas gemas lendárias', url: 'https://diforge.kr/resonance-calc' },
+    { icon: '🎧', title: 'Discord do Clã', desc: 'Servidor do nosso clã no Discord', url: 'https://discord.gg/r4T6hew5' },
+    { icon: '🎧', title: 'Discord da Aliança', desc: 'Servidor da nossa aliança no Discord', url: 'https://discord.gg/YncQxQ4bzB' },
     { icon: '🎧', title: 'Discord Oficial', desc: 'Servidor oficial do Diablo Immortal no Discord', url: 'https://discord.com/invite/QBkEExsmQa' },
+    { icon: '🧮', title: 'Calculadora de Gemas', desc: 'Calcula a Ressonância das suas gemas lendárias', url: 'https://diforge.kr/resonance-calc' },
+    { icon: '🗣️', title: 'Fórum Oficial', desc: 'Discussão geral no fórum oficial da Blizzard', url: 'https://us.forums.blizzard.com/en/diablo-immortal/c/general-discussion/5' },
   ];
 
   // ---------- Configurações (só o líder) ----------
