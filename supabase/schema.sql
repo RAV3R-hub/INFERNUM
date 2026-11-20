@@ -2319,3 +2319,299 @@ begin
   end if;
   return new;
 end $$;
+
+-- =====================================================================
+--  Histórico de alterações dos eventos (quem mexeu no evento e em cada sala)
+--  Só ADICIONA uma tabela, funções e gatilhos, e troca a função save_teams
+--  por uma versão que também registra o histórico (mesmo funcionamento).
+--  Nenhum dado existente é alterado ou apagado. Pode ser executado de novo.
+--  O histórico começa a contar a partir de quando este arquivo for executado.
+-- =====================================================================
+
+create table if not exists public.event_log (
+  id       bigint generated always as identity primary key,
+  event_id bigint not null references public.events(id) on delete cascade,
+  at       timestamptz not null default now(),
+  actor    uuid references public.profiles(id) on delete set null,
+  kind     text not null check (kind in ('created', 'edit', 'format', 'rename', 'lock', 'unlock', 'room')),
+  room     text,
+  detail   jsonb not null default '{}'::jsonb
+);
+create index if not exists event_log_event_idx on public.event_log (event_id, at desc);
+
+alter table public.event_log enable row level security;
+
+-- Só líder e oficiais leem; as escritas são só pelos gatilhos abaixo
+drop policy if exists "event_log_select" on public.event_log;
+create policy "event_log_select" on public.event_log
+  for select to authenticated using (public.is_officer());
+
+-- ---------- Alterações no próprio evento ----------
+create or replace function public.log_event_change() returns trigger
+language plpgsql security definer set search_path = public as $$
+declare
+  d jsonb := '{}'::jsonb;
+  i int;
+  o text;
+  n text;
+begin
+  if tg_op = 'INSERT' then
+    insert into public.event_log (event_id, actor, kind) values (new.id, auth.uid(), 'created');
+    return new;
+  end if;
+
+  if new.title is distinct from old.title then d := d || jsonb_build_object('title', jsonb_build_array(old.title, new.title)); end if;
+  if new.description is distinct from old.description then d := d || jsonb_build_object('description', true); end if;
+  if new.starts_at is distinct from old.starts_at then d := d || jsonb_build_object('starts_at', jsonb_build_array(old.starts_at, new.starts_at)); end if;
+  if new.type_id is distinct from old.type_id then d := d || jsonb_build_object('type_id', jsonb_build_array(old.type_id, new.type_id)); end if;
+  if new.rsvp_close_minutes is distinct from old.rsvp_close_minutes then
+    d := d || jsonb_build_object('rsvp_close_minutes', jsonb_build_array(old.rsvp_close_minutes, new.rsvp_close_minutes));
+  end if;
+  if d <> '{}'::jsonb then
+    insert into public.event_log (event_id, actor, kind, detail) values (new.id, auth.uid(), 'edit', d);
+  end if;
+
+  if (new.team_format, new.team_count) is distinct from (old.team_format, old.team_count) then
+    insert into public.event_log (event_id, actor, kind, detail)
+    values (new.id, auth.uid(), 'format', jsonb_build_object(
+      'format', jsonb_build_array(old.team_format, new.team_format),
+      'count',  jsonb_build_array(old.team_count, new.team_count)));
+  elsif new.team_names is distinct from old.team_names then
+    -- Renomear time (formato Outros): uma linha por time renomeado
+    for i in 1..10 loop
+      o := coalesce(nullif(btrim(old.team_names[i]), ''), 'Time ' || i);
+      n := coalesce(nullif(btrim(new.team_names[i]), ''), 'Time ' || i);
+      if o <> n then
+        insert into public.event_log (event_id, actor, kind, room, detail)
+        values (new.id, auth.uid(), 'rename', n, jsonb_build_object('from', o, 'to', n));
+      end if;
+    end loop;
+  end if;
+
+  if new.teams_locked is distinct from old.teams_locked then
+    insert into public.event_log (event_id, actor, kind)
+    values (new.id, auth.uid(), case when new.teams_locked then 'lock' else 'unlock' end);
+  end if;
+  return new;
+end $$;
+
+drop trigger if exists events_log on public.events;
+create trigger events_log after insert or update on public.events
+  for each row execute function public.log_event_change();
+
+-- ---------- Salas (times) ----------
+-- Registra, por sala, quem entrou e quem saiu (comparando antes e depois)
+create or replace function public.log_room_diff(p_event bigint, p_old jsonb, p_new jsonb) returns void
+language sql security definer set search_path = public as $$
+  with o as (select x ->> 'team' as team, (x ->> 'user_id')::uuid as uid from jsonb_array_elements(coalesce(p_old, '[]'::jsonb)) x),
+       n as (select x ->> 'team' as team, (x ->> 'user_id')::uuid as uid from jsonb_array_elements(coalesce(p_new, '[]'::jsonb)) x),
+       a as (select team, uid from n except select team, uid from o),
+       r as (select team, uid from o except select team, uid from n),
+       rooms as (select team from a union select team from r)
+  insert into public.event_log (event_id, actor, kind, room, detail)
+  select p_event, auth.uid(), 'room', rooms.team, jsonb_build_object(
+           'added',   coalesce((select jsonb_agg(a.uid) from a where a.team = rooms.team), '[]'::jsonb),
+           'removed', coalesce((select jsonb_agg(r.uid) from r where r.team = rooms.team), '[]'::jsonb))
+  from rooms
+$$;
+
+-- Salvar os times (painel "Montar times"): mesmo funcionamento de antes + histórico por sala
+create or replace function public.save_teams(p_event bigint, p_slots jsonb) returns void
+language plpgsql security definer set search_path = public as $$
+declare v_old jsonb;
+begin
+  if not public.is_officer() then
+    raise exception 'Sem permissão para montar times';
+  end if;
+  select coalesce(jsonb_agg(jsonb_build_object('user_id', user_id, 'team', team)), '[]'::jsonb) into v_old
+    from public.team_slots where event_id = p_event;
+  -- os gatilhos de sala não registram nada aqui: o resumo é feito abaixo
+  perform set_config('infernum.slots_logged', '1', true);
+  delete from public.team_slots where event_id = p_event;
+  insert into public.team_slots (event_id, user_id, team)
+  select p_event, (s ->> 'user_id')::uuid, s ->> 'team'
+    from jsonb_array_elements(coalesce(p_slots, '[]'::jsonb)) as s;
+  perform set_config('infernum.slots_logged', '', true);
+  perform public.log_room_diff(p_event, v_old, coalesce(p_slots, '[]'::jsonb));
+end $$;
+
+-- Outras saídas de sala: "Não vou", saída aceita, times removidos ao trocar o formato, membro removido do clã
+create or replace function public.log_slots_deleted() returns trigger
+language plpgsql security definer set search_path = public as $$
+begin
+  if coalesce(current_setting('infernum.slots_logged', true), '') = '1' then return null; end if;
+  insert into public.event_log (event_id, actor, kind, room, detail)
+  select x.event_id, auth.uid(), 'room', x.team,
+         jsonb_build_object('added', '[]'::jsonb, 'removed', jsonb_agg(x.user_id), 'auto', bool_and(x.auto))
+  from (
+    select o.event_id, o.team, o.user_id,
+           not exists (select 1 from public.rsvps r where r.event_id = o.event_id and r.user_id = o.user_id and r.going) as auto
+    from old_rows o
+    where exists (select 1 from public.events e where e.id = o.event_id)
+  ) x
+  group by x.event_id, x.team;
+  return null;
+end $$;
+
+drop trigger if exists team_slots_log_del on public.team_slots;
+create trigger team_slots_log_del after delete on public.team_slots
+  referencing old table as old_rows
+  for each statement execute function public.log_slots_deleted();
+
+-- Entradas em sala fora do painel (raro)
+create or replace function public.log_slots_inserted() returns trigger
+language plpgsql security definer set search_path = public as $$
+begin
+  if coalesce(current_setting('infernum.slots_logged', true), '') = '1' then return null; end if;
+  insert into public.event_log (event_id, actor, kind, room, detail)
+  select n.event_id, auth.uid(), 'room', n.team, jsonb_build_object('added', jsonb_agg(n.user_id), 'removed', '[]'::jsonb)
+  from new_rows n
+  group by n.event_id, n.team;
+  return null;
+end $$;
+
+drop trigger if exists team_slots_log_ins on public.team_slots;
+create trigger team_slots_log_ins after insert on public.team_slots
+  referencing new table as new_rows
+  for each statement execute function public.log_slots_inserted();
+
+-- Quem chama cada função
+revoke execute on function public.log_room_diff(bigint, jsonb, jsonb) from public, anon, authenticated;
+revoke execute on function public.save_teams(bigint, jsonb) from public, anon;
+grant  execute on function public.save_teams(bigint, jsonb) to authenticated;
+
+-- =====================================================================
+--  Histórico de status dos tickets (quem encerrou, reabriu ou pôs em atendimento)
+--  Só ADICIONA uma tabela e um gatilho, e troca a função list_tickets por uma
+--  versão que também devolve esse histórico (mesmo funcionamento).
+--  Nenhum dado existente é alterado ou apagado. Pode ser executado de novo.
+--  O histórico começa a contar a partir de quando este arquivo for executado.
+-- =====================================================================
+
+create table if not exists public.ticket_log (
+  id          bigint generated always as identity primary key,
+  ticket_id   bigint not null references public.tickets(id) on delete cascade,
+  at          timestamptz not null default now(),
+  actor       uuid references public.profiles(id) on delete set null,
+  by_author   boolean not null default false,   -- true = foi quem abriu o ticket (o jogador)
+  from_status text,
+  to_status   text not null
+);
+create index if not exists ticket_log_ticket_idx on public.ticket_log (ticket_id, at);
+
+-- Sem leitura direta: o histórico sai pela list_tickets, que esconde o autor dos anônimos
+alter table public.ticket_log enable row level security;
+
+-- Toda mudança de status fica registrada (pelo botão, por uma resposta ou ao assumir)
+create or replace function public.log_ticket_status() returns trigger
+language plpgsql security definer set search_path = public as $$
+begin
+  if new.status is distinct from old.status then
+    insert into public.ticket_log (ticket_id, actor, by_author, from_status, to_status)
+    values (new.id, auth.uid(), auth.uid() is not distinct from new.author_id, old.status, new.status);
+  end if;
+  return null;
+end $$;
+
+drop trigger if exists ticket_status_log on public.tickets;
+create trigger ticket_status_log after update of status on public.tickets
+  for each row execute function public.log_ticket_status();
+
+-- Mesma list_tickets de antes, agora com o campo "log"
+create or replace function public.list_tickets() returns json
+language sql stable security definer set search_path = public as $$
+  select coalesce(json_agg(x order by x.created_at desc), '[]'::json) from (
+    select t.id, t.title, t.category, t.anonymous, t.status, t.assigned_to, t.created_at,
+      (t.author_id = auth.uid()) as mine,
+      case when t.anonymous and t.author_id <> auth.uid() then null else t.author_id end as author_id,
+      (select coalesce(json_agg(json_build_object(
+          'id', m.id, 'body', m.body, 'internal', m.internal, 'images', m.images, 'created_at', m.created_at,
+          'from_author', m.author_id is not distinct from t.author_id,
+          'author_id', case when t.anonymous and t.author_id <> auth.uid() and m.author_id = t.author_id then null else m.author_id end)
+        order by m.created_at), '[]'::json)
+       from public.ticket_messages m
+       where m.ticket_id = t.id and (not m.internal or t.author_id <> auth.uid())) as messages,
+      (select coalesce(json_agg(json_build_object(
+          'at', l.at, 'from_status', l.from_status, 'to_status', l.to_status, 'by_author', l.by_author,
+          'actor', case when l.by_author and t.anonymous and t.author_id <> auth.uid() then null else l.actor end)
+        order by l.at, l.id), '[]'::json)
+       from public.ticket_log l where l.ticket_id = t.id) as log
+    from public.tickets t
+    where public.is_member() and (t.author_id = auth.uid() or public.ticket_staff(t.category))
+  ) x
+$$;
+
+revoke all on function public.list_tickets() from public, anon;
+grant execute on function public.list_tickets() to authenticated;
+
+-- =====================================================================
+--  Oficiais e líder editam o nick (nome do personagem) dos membros
+--  Só ADICIONA uma função. Nenhum dado existente é alterado ou apagado.
+--  Pode ser executado de novo. A troca entra no histórico do membro,
+--  com quem trocou (coluna changed_by do profile_history).
+-- =====================================================================
+
+create or replace function public.set_member_name(p_user uuid, p_name text) returns void
+language plpgsql security definer set search_path = public as $$
+declare
+  me  text := public.my_role();
+  cur text;
+  v   text := trim(coalesce(p_name, ''));
+begin
+  if me is distinct from 'leader' and me is distinct from 'officer' then
+    raise exception 'Só oficiais e o líder podem editar o nick dos membros' using errcode = '42501';
+  end if;
+  if char_length(v) = 0 then raise exception 'Escreva o nick'; end if;
+  if char_length(v) > 40 then raise exception 'O nick pode ter no máximo 40 caracteres'; end if;
+  select role into cur from public.profiles where id = p_user;
+  if cur is null then raise exception 'Membro não encontrado'; end if;
+  if me = 'officer' then
+    perform public.require_perm('member_rename');
+    -- Oficial edita o próprio nick e o dos membros; o de outros oficiais e do líder, só o líder
+    if p_user <> auth.uid() and cur not in ('pending', 'member', 'former') then
+      raise exception 'Só o líder pode editar o nick de oficiais e do líder' using errcode = '42501';
+    end if;
+  end if;
+  update public.profiles set game_name = v where id = p_user;
+end $$;
+
+revoke execute on function public.set_member_name(uuid, text) from public, anon;
+grant  execute on function public.set_member_name(uuid, text) to authenticated;
+-- =====================================================================
+--  Pedido de piloto: busca uma conta pelo nick (mínimo de 3 letras,
+--  até 8 resultados, só o nome e a classe). Pode ser executado de novo.
+-- =====================================================================
+create or replace function public.find_accounts(p_q text) returns json
+language sql stable security definer set search_path = public as $$
+  with q as (
+    select replace(replace(replace(trim(coalesce(p_q, '')), '\', '\'), '%', '\%'), '_', '\_') as s
+  )
+  select case when not public.is_member() or char_length((select s from q)) < 3 then '[]'::json
+    else coalesce((select json_agg(x) from (
+      select p.id, coalesce(nullif(trim(p.game_name), ''), p.discord_name) as game_name, p.char_class
+        from public.profiles p
+       where p.role in ('member', 'officer', 'leader') and p.id <> auth.uid()
+         and coalesce(nullif(trim(p.game_name), ''), p.discord_name) ilike '%' || (select s from q) || '%'
+       order by 2 limit 8) x), '[]'::json) end
+$$;
+
+revoke execute on function public.find_accounts(text) from public, anon;
+grant  execute on function public.find_accounts(text) to authenticated;
+-- =====================================================================
+--  Foto de perfil: só endereços do espaço de fotos do próprio Supabase
+--  (impede apontar para servidores de fora e rastrear quem vê a foto).
+--  Se trocar o projeto do Supabase, troque o endereço abaixo também.
+--  Pode ser executado de novo.
+-- =====================================================================
+
+-- Remove endereços que não são do espaço de fotos do site
+update public.profiles
+   set custom_avatar_url = null
+ where custom_avatar_url is not null
+   and custom_avatar_url not like 'https://xvqxggkmrurvcbaxyifh.supabase.co/storage/v1/object/public/avatars/' || id::text || '/%';
+
+alter table public.profiles drop constraint if exists profiles_custom_avatar_url_check;
+alter table public.profiles add constraint profiles_custom_avatar_url_check check (
+  custom_avatar_url is null
+  or custom_avatar_url like 'https://xvqxggkmrurvcbaxyifh.supabase.co/storage/v1/object/public/avatars/' || id::text || '/%'
+);

@@ -531,6 +531,8 @@ h1 { background: linear-gradient(180deg, #fff1da, #e3b878); -webkit-background-c
 /* Painel "Meu perfil" do membro */
 .avatar.xl { width: 64px; height: 64px; font-size: 1.5rem; }
 .me-card .row { flex-wrap: nowrap; align-items: flex-start; }
+.me-card .row.me-actions { flex-wrap: wrap; gap: 6px; justify-content: flex-end; flex: 0 1 auto; }
+@media (max-width: 560px) { .me-card .row.me-actions { flex-direction: column; align-items: stretch; } }
 .me-name { font-family: "Cinzel", serif; font-size: 1.4rem; font-weight: 700; color: var(--gold); }
 .panels { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 12px; }
 .panels h2 { display: flex; align-items: center; gap: 8px; font-size: 1.05rem; }
@@ -802,6 +804,11 @@ h1 { background: linear-gradient(180deg, #fff1da, #e3b878); -webkit-background-c
 .tk-msg.internal { background: rgba(220, 170, 82, .08); border: 1px dashed rgba(220, 170, 82, .55); }
 .tk-msg-head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-bottom: 4px; font-size: .9rem; }
 .tk-msg-head .muted { margin-left: auto; }
+/* Mudanças de status no meio da conversa (encerrado, reaberto…) */
+.tk-event { align-self: center; display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 4px 10px; max-width: 92%;
+  padding: 5px 12px; border-radius: 999px; border: 1px solid var(--border); background: rgba(255, 255, 255, .03); font-size: .85rem; color: var(--muted); text-align: center; }
+.tk-event.done { border-color: rgba(79, 176, 109, .4); background: var(--yes-bg); color: #c9f0d2; }
+.tk-closed { margin-top: 4px; color: #9fd9ae; }
 .tk-role { font-size: .68rem; text-transform: uppercase; letter-spacing: .05em; padding: 1px 6px; border-radius: 6px; background: rgba(255, 255, 255, .08); color: var(--gold); }
 .tk-int { font-size: .75rem; color: var(--gold); }
 .tk-text { white-space: pre-line; overflow-wrap: anywhere; }
@@ -1025,3 +1032,18 @@ body.has-fab main { padding-bottom: 90px; }
 .leave-card { margin-top: 12px; }
 .leave-card.pending { border-color: #6b4a12; }
 .leave-card .row.end { margin-top: 10px; }
+
+/* ---------- Histórico de alterações do evento ---------- */
+.team-edit { font-size: .74rem; color: var(--muted); margin: -2px 0 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ev-log-list { display: grid; gap: 10px; max-height: min(60vh, 520px); overflow-y: auto; padding-right: 4px; }
+.ev-log-item { padding: 10px 12px; border: 1px solid var(--border); border-radius: 10px; background: rgba(255, 255, 255, .02); }
+.ev-log-head { margin-bottom: 4px; }
+.ev-log-item ul { margin: 0; padding-left: 18px; display: grid; gap: 3px; font-size: .9rem; }
+.ev-log-item .c-yes { color: var(--yes); font-weight: 600; }
+.ev-log-item .c-no { color: #ff9d95; font-weight: 600; }
+
+/* ---------- Contador de respostas no botão da Central de Atendimento ---------- */
+.help-fab-badge { position: absolute; top: -4px; right: -4px; min-width: 22px; height: 22px; padding: 0 6px; border-radius: 11px; background: var(--gold); color: #1d1406; font-size: .75rem; font-weight: 800; line-height: 22px; text-align: center; box-shadow: 0 0 0 2px var(--bg); animation: fab-pulse 1.8s ease-in-out infinite; }
+.help-fab-badge[hidden] { display: none; }
+@keyframes fab-pulse { 0%, 100% { transform: scale(1); } 50% { transform: scale(1.15); } }
+@media (prefers-reduced-motion: reduce) { .help-fab-badge { animation: none; } }

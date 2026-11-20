@@ -67,8 +67,9 @@
     'Arena Ancestral', 'Pesadelo Ancestral', 'Carruagem Assombrada', 'Torre Amaldiçoada',
     'Raid do clã', 'Reunião do clã',
   ];
-  // Eventos que começaram há menos disso ainda aparecem em "Próximos".
-  const STILL_UPCOMING_MS = 3 * 3600 * 1000;
+  // Eventos que começaram há menos disso ainda aparecem em "Próximos" (com o selo "Agora");
+  // depois passam sozinhos para "Passados".
+  const STILL_UPCOMING_MS = 20 * 60 * 1000;
   // Prazo para responder (minutos antes do início). null = sem prazo.
   const RSVP_CLOSE_OPTIONS = [[null, 'Sem prazo'], [30, '30 min antes'], [60, '1h antes'], [120, '2h antes'], [180, '3h antes'],
     [360, '6h antes'], [720, '12h antes'], [1440, '1 dia antes']];
@@ -166,6 +167,8 @@
         const ids = new Set(rows.map((r) => r.id));
         return rows.concat((dir.data || []).filter((r) => !ids.has(r.id)));
       },
+      // Pedido de piloto (membro comum): busca uma conta pelo nick
+      async findAccounts(q) { return ok(await sb.rpc('find_accounts', { p_q: q })) || []; },
       async myPhone() { return ok(await sb.from('member_contacts').select('phone').eq('user_id', state.user.id).maybeSingle())?.phone ?? ''; },
       async contacts() { return ok(await sb.from('member_contacts').select('user_id, phone')); },
       async syncDiscord() { ok(await sb.rpc('sync_discord_profile')); },
@@ -261,6 +264,7 @@
       async addPilot(accountId, pilotId) { ok(await sb.rpc('add_pilot', { p_account: accountId, p_pilot: pilotId })); },
       async setRole(userId, role) { ok(await sb.rpc('set_member_role', { target: userId, new_role: role })); },
       async removeMember(userId, reason, withManaged) { ok(await sb.rpc('remove_member', { target: userId, reason: reason || '', with_managed: !!withManaged })); },
+      async renameMember(userId, name) { ok(await sb.rpc('set_member_name', { p_user: userId, p_name: name })); },
       async requestRejoin() { ok(await sb.rpc('request_rejoin')); },
       // ----- Malah News (imagens no bucket privado "news") -----
       async news() {
@@ -355,6 +359,11 @@
         ok(await q);
       },
       async saveTeams(eventId, slots) { ok(await sb.rpc('save_teams', { p_event: eventId, p_slots: slots })); },
+      // Histórico de alterações do evento e das salas (só líder e oficiais)
+      async eventLog(eventId) {
+        return ok(await sb.from('event_log').select('*').eq('event_id', eventId)
+          .order('at', { ascending: false }).order('id', { ascending: false }).limit(300));
+      },
       async renameTeam(eventId, index, name) { ok(await sb.rpc('rename_team', { p_event: eventId, p_index: index + 1, p_name: name })); },
       // Foto de perfil: blob = nova foto; null + hidden = sem foto; null sem hidden = volta a do Discord
       async setAvatar(blob, hidden = false) {
@@ -587,6 +596,17 @@
       { id: 7, ticket_id: 803, author_id: 'u0', body: 'Bem-vindo! É a disputa pelo trono entre os clãs vencedores. Confirme presença no evento que montamos os times.', internal: false, images: [], created_at: day(-9, 21) },
       { id: 8, ticket_id: 803, author_id: 'u6', body: 'Entendi, valeu!', internal: false, images: [], created_at: day(-8, 12) },
     ];
+    // Histórico de status (quem encerrou, reabriu ou pôs em atendimento)
+    db.tlog = [
+      { ticket_id: 801, at: day(-2, 10), actor: 'u1', by_author: false, from_status: 'open', to_status: 'progress' },
+      { ticket_id: 803, at: day(-9, 21), actor: 'u0', by_author: false, from_status: 'open', to_status: 'progress' },
+      { ticket_id: 803, at: day(-8, 12, 2), actor: 'u6', by_author: true, from_status: 'progress', to_status: 'resolved' },
+    ];
+    const tlogStatus = (t, to) => {
+      if (t.status === to) return;
+      db.tlog.push({ ticket_id: t.id, at: new Date().toISOString(), actor: state.user.id, by_author: t.author_id === state.user.id, from_status: t.status, to_status: to });
+      t.status = to;
+    };
     // Quem atende pode ver este ticket? (igual às regras do banco)
     const staffSeesTicket = (t) => isOfficer() && (isLeader()
       || (permMode('ticket_view') !== 'deny' && (t.category !== 'report' || permMode('ticket_reports') !== 'deny')));
@@ -602,6 +622,7 @@
           messages: db.tmsgs.filter((m) => m.ticket_id === t.id && (!m.internal || !mine))
             .sort((a, b) => Date.parse(a.created_at) - Date.parse(b.created_at))
             .map((m) => ({ ...m, images: [...m.images], from_author: m.author_id === t.author_id, author_id: hide && m.author_id === t.author_id ? null : m.author_id })),
+          log: db.tlog.filter((l) => l.ticket_id === t.id).map(({ ticket_id, ...l }) => ({ ...l, actor: hide && l.by_author ? null : l.actor })),
         };
       });
     const ticketRow = (id) => db.tickets.find((t) => t.id === id);
@@ -634,7 +655,50 @@
         attendance: db.attendance.filter((a) => a.event_id === e.id && (officer || canActAsDemo(a.user_id))).map((a) => ({ user_id: a.user_id, present: a.present })),
       };
     };
-    const dropSlot = (eventId, userId) => { db.slots = db.slots.filter((s) => !(s.event_id === eventId && s.user_id === userId)); };
+    // Histórico de alterações dos eventos (mesmas regras dos gatilhos do banco)
+    db.elog = [];
+    const elog = (event_id, kind, room = null, detail = {}, at = new Date().toISOString(), actor = state.user?.id ?? null) =>
+      db.elog.push({ id: db.elog.length + 1, event_id, at, actor, kind, room, detail });
+    const slotsOf = (eventId) => db.slots.filter((s) => s.event_id === eventId).map((s) => ({ user_id: s.user_id, team: s.team }));
+    const logRoomDiff = (eventId, before, after, extra = {}) => {
+      const key = (s) => `${s.team}|${s.user_id}`;
+      const added = after.filter((s) => !before.some((o) => key(o) === key(s)));
+      const removed = before.filter((s) => !after.some((n) => key(n) === key(s)));
+      [...new Set([...added, ...removed].map((s) => s.team))].forEach((room) => elog(eventId, 'room', room, {
+        added: added.filter((s) => s.team === room).map((s) => s.user_id),
+        removed: removed.filter((s) => s.team === room).map((s) => s.user_id), ...extra }));
+    };
+    const logEventUpdate = (e, row) => {
+      const d = {};
+      if ('title' in row && row.title !== e.title) d.title = [e.title, row.title];
+      if ('description' in row && (row.description || null) !== (e.description || null)) d.description = true;
+      if ('starts_at' in row && Date.parse(row.starts_at) !== Date.parse(e.starts_at)) d.starts_at = [e.starts_at, row.starts_at];
+      if ('type_id' in row && (row.type_id ?? null) !== (e.type_id ?? null)) d.type_id = [e.type_id ?? null, row.type_id ?? null];
+      if ('rsvp_close_minutes' in row && (row.rsvp_close_minutes ?? null) !== (e.rsvp_close_minutes ?? null)) d.rsvp_close_minutes = [e.rsvp_close_minutes ?? null, row.rsvp_close_minutes ?? null];
+      if (Object.keys(d).length) elog(e.id, 'edit', null, d);
+      const fmt = 'team_format' in row ? row.team_format : e.team_format;
+      const cnt = 'team_count' in row ? row.team_count : e.team_count;
+      if (fmt !== e.team_format || cnt !== e.team_count) elog(e.id, 'format', null, { format: [e.team_format ?? null, fmt ?? null], count: [e.team_count, cnt] });
+      if ('teams_locked' in row && !!row.teams_locked !== !!e.teams_locked) elog(e.id, row.teams_locked ? 'lock' : 'unlock');
+    };
+    // Saída de sala fora do painel ("Não vou", saída aceita): auto = a pessoa não vai mais
+    const dropSlot = (eventId, userId) => {
+      const before = slotsOf(eventId);
+      db.slots = db.slots.filter((s) => !(s.event_id === eventId && s.user_id === userId));
+      logRoomDiff(eventId, before, slotsOf(eventId), { auto: !db.rsvps.some((r) => r.event_id === eventId && r.user_id === userId && r.going) });
+    };
+    // Exemplos na Guerra das Sombras de amanhã
+    {
+      const ago = (h) => new Date(Date.now() - h * 3600e3).toISOString();
+      const inRoom = (t) => db.slots.filter((s) => s.event_id === 1 && s.team === t).map((s) => s.user_id);
+      elog(1, 'created', null, {}, ago(72), 'u1');
+      elog(1, 'format', null, { format: [null, 'guerra'], count: [10, 10] }, ago(31), 'u1');
+      elog(1, 'room', 'Exaltação 1', { added: inRoom('Exaltação 1'), removed: [] }, ago(30), 'u1');
+      elog(1, 'edit', null, { description: true }, ago(20), 'u1');
+      elog(1, 'room', 'Exaltação 2', { added: inRoom('Exaltação 2'), removed: [] }, ago(6), 'u0');
+      elog(1, 'room', 'Exaltação 1', { added: [], removed: ['u30'] }, ago(6), 'u0');
+      elog(1, 'lock', null, {}, ago(5), 'u0');
+    }
     // Ausência: eventos futuros do período viram "Não vou" (igual à função apply_absence do banco)
     const absenceCovers = (a, ev) => { const d = localDay(new Date(ev.starts_at)); return d >= a.starts_on && d <= a.ends_on; };
     function applyAbsenceDemo(a, events = db.events) {
@@ -680,6 +744,13 @@
         // Igual às regras do banco para o membro comum
         return db.profiles.filter((p) => canActAsDemo(p.id) || ACTIVE_ROLES.includes(p.role))
           .map((p) => (canActAsDemo(p.id) ? { ...p } : directoryRow(p)));
+      },
+      async findAccounts(q) {
+        const s = String(q || '').trim().toLowerCase();
+        if (!isMember() || s.length < 3) return [];
+        return db.profiles.filter((p) => ['member', 'officer', 'leader'].includes(p.role) && p.id !== state.user.id
+          && displayName(p).toLowerCase().includes(s))
+          .sort(byName).slice(0, 8).map((p) => ({ id: p.id, game_name: displayName(p), char_class: p.char_class }));
       },
       async myPhone() { return db.contacts.find((c) => c.user_id === state.user.id)?.phone ?? ''; },
       async contacts() { return db.contacts.map((c) => ({ ...c })); },
@@ -738,7 +809,7 @@
       },
       async createEvents(rows) {
         return rows.map((r) => {
-          const e = { id: db.nextId++, team_format: null, team_count: 10, ...r }; db.events.push(e);
+          const e = { id: db.nextId++, team_format: null, team_count: 10, ...r }; db.events.push(e); elog(e.id, 'created');
           db.absences.forEach((a) => applyAbsenceDemo(a, [e]));
           return { id: e.id };
         });
@@ -892,12 +963,19 @@
         if (accept) { r.going = false; r.discord = null; dropSlot(eventId, userId); }
         r.withdraw_reason = null; r.withdraw_requested_at = null;
       },
-      async updateEvent(id, row) { Object.assign(db.events.find((e) => e.id === id), row); },
+      async updateEvent(id, row) { const e = db.events.find((x) => x.id === id); logEventUpdate(e, row); Object.assign(e, row); },
+      async eventLog(eventId) {
+        if (!isOfficer()) return [];
+        return db.elog.filter((x) => x.event_id === eventId)
+          .sort((a, b) => (Date.parse(b.at) - Date.parse(a.at)) || (b.id - a.id))
+          .map((x) => ({ ...x, detail: JSON.parse(JSON.stringify(x.detail)) }));
+      },
       async deleteEvent(id) {
         db.events = db.events.filter((e) => e.id !== id);
         db.rsvps = db.rsvps.filter((r) => r.event_id !== id);
         db.slots = db.slots.filter((s) => s.event_id !== id);
         db.attendance = db.attendance.filter((a) => a.event_id !== id);
+        db.elog = db.elog.filter((x) => x.event_id !== id);
       },
       async setRsvp(eventId, going, build, accountId) {
         const acct = accountId || state.user.id;
@@ -918,6 +996,19 @@
         const p = profile(userId);
         db.mlog.push({ id: db.mlog.length + 1, user_id: userId, from_role: p.role, to_role: role, changed_by: state.user.id, reason: null, changed_at: new Date().toISOString() });
         p.role = role;
+      },
+      // Oficiais e líder trocam o nick (nome do personagem); vai para o histórico com quem trocou
+      async renameMember(userId, name) {
+        const p = profile(userId);
+        const me = profile(state.user.id).role;
+        const v = String(name || '').trim();
+        if (!p) throw new Error('Membro não encontrado');
+        if (!v) throw new Error('Escreva o nick');
+        if (v.length > 40) throw new Error('O nick pode ter no máximo 40 caracteres');
+        if (me !== 'leader' && me !== 'officer') throw new Error('Só oficiais e o líder podem editar o nick dos membros');
+        if (me === 'officer' && userId !== state.user.id && !['pending', 'member', 'former'].includes(p.role)) throw new Error('Só o líder pode editar o nick de oficiais e do líder');
+        if ((p.game_name || null) !== v) db.history.push({ id: db.history.length + 1, user_id: p.id, changed_by: state.user.id, changed_at: new Date().toISOString(), changes: { game_name: [p.game_name || null, v] } });
+        p.game_name = v;
       },
       async removeMember(userId, reason, withManaged) {
         const p = profile(userId);
@@ -998,8 +1089,8 @@
         if (internal && mine) throw new Error('Notas internas são só para quem atende');
         db.tmsgs.push({ id: db.nextId++, ticket_id: id, author_id: state.user.id, body, internal: !!internal, images: images || [], created_at: new Date().toISOString() });
         // Membro escrevendo num ticket resolvido reabre; resposta de quem atende põe "Em andamento"
-        if (mine && t.status === 'resolved') t.status = 'open';
-        if (!mine && !internal && t.status === 'open') t.status = 'progress';
+        if (mine && t.status === 'resolved') tlogStatus(t, 'open');
+        if (!mine && !internal && t.status === 'open') tlogStatus(t, 'progress');
       },
       async setTicketStatus(id, status) {
         const t = ticketRow(id);
@@ -1007,13 +1098,13 @@
         const mine = t.author_id === state.user.id;
         if (!mine && !isStaffOn(t)) throw new Error('Sem permissão');
         if (mine && !['open', 'resolved'].includes(status)) throw new Error('Você só pode resolver ou reabrir o seu ticket');
-        t.status = status;
+        tlogStatus(t, status);
       },
       async assignTicket(id, userId) {
         const t = ticketRow(id);
         if (!t || !isStaffOn(t)) throw new Error('Sem permissão');
         t.assigned_to = userId || null;
-        if (userId && t.status === 'open') t.status = 'progress'; // assumiu = Em atendimento
+        if (userId && t.status === 'open') tlogStatus(t, 'progress'); // assumiu = Em atendimento
       },
       async revealTicketAuthor(id) {
         if (!isLeader()) throw new Error('Só o líder pode ver o autor de um ticket anônimo');
@@ -1089,7 +1180,11 @@
         db.slots.push({ event_id: eventId, user_id: userId, team });
       },
       async unassign(eventId, userId) { dropSlot(eventId, userId); },
-      async removeTeams(eventId, teams) { db.slots = db.slots.filter((s) => !(s.event_id === eventId && (!teams || teams.includes(s.team)))); },
+      async removeTeams(eventId, teams) {
+        const before = slotsOf(eventId);
+        db.slots = db.slots.filter((s) => !(s.event_id === eventId && (!teams || teams.includes(s.team))));
+        logRoomDiff(eventId, before, slotsOf(eventId), { auto: false });
+      },
       // Mesmas regras da função rename_team do banco
       async renameTeam(eventId, index, name) {
         const e = db.events.find((x) => x.id === eventId);
@@ -1104,6 +1199,7 @@
         if (teamNames(next).some((t, i) => i !== index && norm(t) === norm(newName))) throw new Error('Já existe um time com esse nome');
         e.team_names = names;
         db.slots.forEach((s) => { if (s.event_id === eventId && s.team === oldName) s.team = newName; });
+        if (oldName !== newName) elog(eventId, 'rename', newName, { from: oldName, to: newName });
       },
       async setAvatar(blob, hidden = false) {
         const p = profile(state.user.id);
@@ -1118,7 +1214,9 @@
           count[s.team] = (count[s.team] || 0) + 1;
           if (count[s.team] > TEAM_SIZE) throw new Error(`O time ${s.team} passou de 8 membros`);
         });
+        const before = slotsOf(eventId);
         db.slots = db.slots.filter((s) => s.event_id !== eventId).concat(slots.map((s) => ({ event_id: eventId, user_id: s.user_id, team: s.team })));
+        logRoomDiff(eventId, before, slotsOf(eventId));
       },
       async saveAttendance(eventId, rows) {
         rows.forEach((r) => {
@@ -1151,6 +1249,7 @@
       { key: 'member_approve', label: 'Aprovar novos membros', approval: true },
       { key: 'member_remove', label: 'Remover ou recusar membros', approval: true },
       { key: 'leave_approve', label: 'Aprovar saída do clã', desc: 'Pedidos de membros que querem sair do clã (o de oficiais fica com o líder)', approval: true },
+      { key: 'member_rename', label: 'Editar o nick dos membros', desc: 'Trocar o nome do personagem de membros e de quem aguarda aprovação', approval: true },
       { key: 'pilots', label: 'Gerenciar pilotos de contas', desc: 'Aprovar pedidos de piloto e adicionar pilotos' },
       { key: 'notes', label: 'Anotações internas', desc: 'Ver e escrever anotações sobre os membros' },
       { key: 'view_phone', label: 'Ver telefones' },
@@ -1225,6 +1324,7 @@
     resolveWithdrawal: () => ['withdraw_decide'],
     setRole: (raw, id, role) => (role === 'member' && memberById(id)?.role === 'pending' ? ['member_approve', `Aprovar ${nameOf(id)} como membro do clã`] : null),
     removeMember: (raw, id, reason) => ['member_remove', `${memberById(id)?.role === 'pending' ? 'Recusar a entrada de' : 'Remover do clã'} ${nameOf(id)}${reason ? ` · motivo: “${reason}”` : ''}`],
+    renameMember: (raw, id, name) => (id === state.user.id ? null : ['member_rename', `Trocar o nick de ${nameOf(id)} para “${String(name || '').trim()}”`]),
     addNote: () => ['notes'],
     addPilot: () => ['pilots'],
     decidePilotAccess: (raw, acc) => (acc === state.user.id ? null : ['pilots']),
@@ -1265,6 +1365,7 @@
     deleteEvent: ([id]) => [Number(id)],
     setRole: ([id]) => [String(id), 'member'],
     removeMember: ([id, reason, withManaged]) => [String(id), String(reason || '').slice(0, 300), !!withManaged],
+    renameMember: ([id, name]) => [String(id), String(name || '').trim().slice(0, 40)],
     createNewsFromPath: ([o]) => [{ image_path: String(o?.image_path || ''), title: String(o?.title || ''), caption: o?.caption ? String(o.caption) : null }],
     updateNews: ([id, f]) => [Number(id), { title: String(f?.title || ''), caption: f?.caption ? String(f.caption) : null }],
     deleteNews: ([p]) => [{ id: Number(p?.id), image_path: String(p?.image_path || ''), title: String(p?.title || '') }],
@@ -1555,7 +1656,7 @@
         toast(`Agora você está respondendo como ${displayName(actingProfile())}`);
         route();
       });
-      $('#btn-profile').addEventListener('click', openProfile);
+      $('#btn-profile').addEventListener('click', () => openProfile());
       renderBell();
       $('#btn-logout').addEventListener('click', () => api.signOut().catch(fail));
     } else box.innerHTML = '';
@@ -1729,7 +1830,7 @@
         <button class="btn" id="btn-recheck">Verificar de novo</button>
       </div>
     </div>`;
-    $('#btn-pf').addEventListener('click', openProfile);
+    $('#btn-pf').addEventListener('click', () => openProfile());
     $('#btn-recheck').addEventListener('click', () => boot());
   }
 
@@ -2098,7 +2199,9 @@
     }).join('');
   }
 
+  let eventsTimer = null;
   async function viewEvents(past) {
+    clearTimeout(eventsTimer);
     loading();
     const events = await api.events(past);
     // Resultado das guerras: só para eventos que já começaram
@@ -2106,6 +2209,20 @@
     const results = started.length ? await api.eventResults(started).catch(() => []) : [];
     const resBy = Object.fromEntries(results.map((r) => [r.event_id, r]));
     events.forEach((e) => { e.result = resBy[e.id] || null; });
+    // Quem está com a lista aberta vê o selo "Agora" aparecer no início e o evento
+    // sair para "Passados" 20 min depois, sem recarregar a página
+    if (!past) {
+      const now = Date.now();
+      const next = Math.min(...events.flatMap((ev) => [Date.parse(ev.starts_at), Date.parse(ev.starts_at) + STILL_UPCOMING_MS]).filter((t) => t > now));
+      const wait = next - now;
+      const key = currentRouteKey();
+      const refresh = () => {
+        if (currentRouteKey() !== key) return;
+        if ($('#dlg').open) { eventsTimer = setTimeout(refresh, 30000); return; }
+        route();
+      };
+      if (Number.isFinite(wait) && wait < 2 * 86400e3) eventsTimer = setTimeout(refresh, wait + 1500);
+    }
     const head = `<div class="page-head"><h1>${past ? 'Eventos passados' : 'Próximos eventos'}</h1>
       ${can('event_create') && !past ? '<button class="btn primary" id="btn-new">+ Novo evento</button>' : ''}</div>`;
     const body = events.length
@@ -2166,12 +2283,23 @@
     </div></div>`;
   }
 
-  function teamCard(name, people, { editable = false, sel = null, showFoot = true, bare = false, renameIndex = null } = {}) {
+  // Última alteração de cada sala feita pela staff (o histórico vem do mais novo para o mais antigo)
+  function lastRoomEdits(log) {
+    const out = {};
+    (log || []).forEach((x) => {
+      if ((x.kind === 'room' || x.kind === 'rename') && x.room && !out[x.room] && ['officer', 'leader'].includes(memberById(x.actor)?.role)) out[x.room] = x;
+    });
+    return out;
+  }
+  const editTag = (x) => (x ? `<div class="team-edit" title="Último oficial ou líder a alterar esta sala">✎ ${esc(nameOf(x.actor))} · ${esc(fmtShortDate(x.at))} ${esc(fmtTime(x.at))}</div>` : '');
+
+  function teamCard(name, people, { editable = false, sel = null, showFoot = true, bare = false, renameIndex = null, edits = null } = {}) {
     const hide = bare || aggMode() === 'hide';
     const mineHere = people.some((p) => p.id === actingId());
     const empties = editable ? Array.from({ length: TEAM_SIZE - people.length }, () => '<div class="slot-empty">vazio</div>').join('') : '';
     return `<div class="team${mineHere ? ' mine' : ''}${people.length >= TEAM_SIZE ? ' full' : ''}${editable && sel ? ' target' : ''}" data-team="${esc(name)}">
       <div class="team-head"><strong>${esc(name)}${renameIndex !== null ? ` <button type="button" class="team-rename" data-rename="${renameIndex}" title="Renomear este time" aria-label="Renomear ${esc(name)}">✏️</button>` : ''}</strong><span class="muted small">${people.some((p) => p.discord) ? `<span class="dc-count" title="Integrantes no Discord">🎧 ${people.filter((p) => p.discord).length}</span> · ` : ''}${people.length}/${TEAM_SIZE}</span></div>
+      ${edits ? editTag(edits[name]) : ''}
       <div class="team-slots">${people.map((p) => chip(p, { draggable: editable, removable: editable, selected: sel === p.id, compact: true, bare: hide, medals: true })).join('')}${empties}</div>
       ${people.length && showFoot && !hide ? teamFoot(people) : ''}
     </div>`;
@@ -2197,6 +2325,62 @@
     const out = people.filter((p) => !slots.has(p.id));
     if (out.length) lines.push(`Sem time (${out.length}): ${out.map((p) => p.name).join(', ')}`);
     return lines.join('\n');
+  }
+
+  // ---------- Histórico de alterações do evento (líder e oficiais) ----------
+  const closeLabel = (m) => RSVP_CLOSE_OPTIONS.find(([v]) => v === (m ?? null))?.[1] || (m == null ? 'Sem prazo' : `${m} min antes`);
+  const whenLabel = (iso) => `${fmtShortDate(iso)} ${fmtTime(iso)}`;
+  function eventLogLine(x) {
+    const d = x.detail || {};
+    const who = (ids) => ids.map((u) => `<b>${esc(nameOf(u))}</b>`).join(', ');
+    if (x.kind === 'created') return '🆕 Criou o evento';
+    if (x.kind === 'lock') return '🔒 Travou os times';
+    if (x.kind === 'unlock') return '🔓 Destravou os times';
+    if (x.kind === 'rename') return `✏️ Renomeou o time <b>${esc(d.from)}</b> para <b>${esc(d.to)}</b>`;
+    if (x.kind === 'format') {
+      const [fo, fn] = d.format || []; const [, cn] = d.count || [];
+      return `⚔ Formato dos times: ${esc(FORMAT_LABEL[fo] || 'nenhum')} → <b>${esc(FORMAT_LABEL[fn] || 'nenhum')}</b>${fn === 'rito' && cn ? ` (${cn} times)` : ''}`;
+    }
+    if (x.kind === 'edit') {
+      const parts = [];
+      if (d.title) parts.push(`nome “${esc(d.title[0])}” → “${esc(d.title[1])}”`);
+      if (d.starts_at) parts.push(`data ${esc(whenLabel(d.starts_at[0]))} → ${esc(whenLabel(d.starts_at[1]))}`);
+      if (d.type_id) parts.push(`tipo ${esc(typeName(d.type_id[0]) || '—')} → ${esc(typeName(d.type_id[1]) || '—')}`);
+      if (d.rsvp_close_minutes) parts.push(`prazo para responder ${esc(closeLabel(d.rsvp_close_minutes[0]))} → ${esc(closeLabel(d.rsvp_close_minutes[1]))}`);
+      if (d.description) parts.push('descrição');
+      return `📝 Editou o evento: ${parts.join(' · ')}`;
+    }
+    if (x.kind === 'room') {
+      const bits = [];
+      if (d.added?.length) bits.push(`<span class="c-yes">entrou</span> ${who(d.added)}`);
+      if (d.removed?.length) bits.push(`<span class="c-no">saiu</span> ${who(d.removed)}`);
+      return `🛡 <b>${esc(x.room)}</b>: ${bits.join(' · ')}${d.auto ? ' <span class="muted">(marcou “Não vou” ou teve a saída aceita)</span>' : ''}`;
+    }
+    return esc(x.kind);
+  }
+  function openEventLog(ev, log) {
+    // Junta o que a mesma pessoa fez no mesmo momento (ex.: salvar várias salas de uma vez)
+    const blocks = [];
+    (log || []).forEach((x) => {
+      const last = blocks[blocks.length - 1];
+      if (last && last.actor === x.actor && Math.abs(Date.parse(last.at) - Date.parse(x.at)) < 5000) last.items.push(x);
+      else blocks.push({ actor: x.actor, at: x.at, items: [x] });
+    });
+    const actorLabel = (id) => {
+      if (!id) return '<b>Sistema</b>';
+      const p = memberById(id);
+      return `<b>${esc(nameOf(id))}</b>${p ? ` <span class="muted small">(${esc(ROLE_LABEL[p.role] || p.role)})</span>` : ''}`;
+    };
+    openDialog(`<div class="stack ev-log">
+        <h2>🕘 Histórico de alterações</h2>
+        <p class="muted small" style="margin:0">${esc(ev.title)} · ${esc(fmtDay(ev.starts_at))}. Quem alterou o evento e cada sala, do mais recente para o mais antigo.</p>
+        ${blocks.length ? `<div class="ev-log-list">${blocks.map((b) => `<div class="ev-log-item">
+            <div class="ev-log-head">${actorLabel(b.actor)} <span class="muted small">· ${esc(fmtWhen(b.at))}</span></div>
+            <ul>${b.items.map((x) => `<li>${eventLogLine(x)}</li>`).join('')}</ul>
+          </div>`).join('')}</div>`
+          : '<p class="muted">Nenhuma alteração registrada ainda. O histórico conta a partir de quando ele foi ativado no site.</p>'}
+        <div class="row end"><button type="button" class="btn ghost" data-close>Fechar</button></div>
+      </div>`, () => {});
   }
 
   // ---------- Detalhe do evento ----------
@@ -2310,6 +2494,9 @@
     const mine = myTeam(ev);
     // Oficiais veem todos os times; membro comum vê só o próprio (sem totais e sem copiar)
     const showTeams = officer ? ev.team_format && slots.size > 0 : !!mine;
+    // Histórico de alterações (líder e oficiais): quem mexeu em cada sala por último
+    const log = officer ? await api.eventLog(ev.id).catch((e) => { console.warn('histórico do evento', e); return []; }) : [];
+    const edits = lastRoomEdits(log);
 
     // Resumo da presença real (oficiais)
     let attendanceBox = '';
@@ -2358,6 +2545,7 @@
         <div class="row">
           <button class="btn small ghost" id="btn-copy">🔗 Copiar link</button>${calBtn(ev)}
           ${isOfficer() ? `<button class="btn small ghost" id="btn-copy-list">📋 Copiar lista</button>
+            <button class="btn small ghost" id="btn-history" title="Quem alterou o evento e cada sala">🕘 Histórico de alterações</button>
             <span class="spacer"></span>
             ${can('teams_build') ? `<a class="btn small primary" id="btn-teams" href="#/evento/${ev.id}/times">⚔ ${finished ? 'Revisar times' : 'Montar times'}</a>` : ''}
             ${can('event_edit') ? '<button class="btn small" id="btn-edit">Editar</button>' : ''}
@@ -2380,7 +2568,7 @@
               <button class="${aggMode() === 'hide' ? 'on' : ''}" data-agg="hide" title="Mostrar só nome e classe de cada membro">Ocultar</button>
             </div>
             <button class="btn small ghost" id="btn-copy-teams">📋 Copiar times</button></div>
-          <div id="ev-teams">${teamsHtml(ev, people, slots)}</div>`
+          <div id="ev-teams">${teamsHtml(ev, people, slots, { edits })}</div>`
         : `<div class="section-head"><h2>Seu time</h2></div>
           <div class="teams-grid single">${teamCard(mine, people.filter((p) => slots.get(p.id) === mine), { showFoot: false, bare: true })}</div>`}
       ${officer ? `<div class="lists">
@@ -2394,6 +2582,7 @@
     bindRsvp(main, [ev], () => viewEvent(id));
     $('#btn-copy').addEventListener('click', () => copy(location.href, 'Link copiado'));
     $('#btn-copy-teams')?.addEventListener('click', () => copy(teamsText(ev, people, slots), 'Times copiados — cole no Discord'));
+    $('#btn-history')?.addEventListener('click', () => openEventLog(ev, log));
     const resolve = async (uid, accept) => {
       const p = state.members.find((m) => m.id === uid);
       const msg = accept
@@ -2407,7 +2596,7 @@
     // Média / Totalizador (oficiais): redesenha só os times, sem recarregar a página
     main.querySelectorAll('[data-agg]').forEach((b) => b.addEventListener('click', () => {
       setAggMode(b.dataset.agg);
-      $('#ev-teams').innerHTML = teamsHtml(ev, people, slots);
+      $('#ev-teams').innerHTML = teamsHtml(ev, people, slots, { edits });
       main.querySelectorAll('[data-agg]').forEach((x) => x.classList.toggle('on', x.dataset.agg === aggMode()));
     }));
     $('#btn-attend')?.addEventListener('click', () => openAttendanceDialog(ev, () => viewEvent(id)));
@@ -2674,6 +2863,7 @@
     T.slots = new Map((ev.team_slots || []).map((s) => [s.user_id, s.team]));
     T.orig = new Map(T.slots);
     T.sel = null;
+    T.log = await api.eventLog(id).catch((e) => { console.warn('histórico do evento', e); return []; });
     renderTeams();
   }
 
@@ -2764,7 +2954,7 @@
           </div>
           ${classSummary()}
         </aside>
-        <section class="teams-area">${teamsHtml(ev, T.people, T.slots, { editable: true, sel: T.sel, renamable: ev.team_format === 'rito' })}</section>
+        <section class="teams-area">${teamsHtml(ev, T.people, T.slots, { editable: true, sel: T.sel, renamable: ev.team_format === 'rito', edits: lastRoomEdits(T.log) })}</section>
       </div>`;
     // Destaca quem foi movido e ainda não foi salvo
     main.querySelectorAll('.chip[data-uid]').forEach((c) => {
@@ -2916,7 +3106,12 @@
       const fresh = await api.event(T.ev.id);
       const server = new Map((fresh.team_slots || []).map((s) => [s.user_id, s.team]));
       const same = server.size === T.orig.size && [...server].every(([u, t]) => T.orig.get(u) === t);
-      if (!same && !(await confirmDialog('Outro oficial alterou estes times depois que você abriu a página. Salvar agora vai substituir as alterações dele. Continuar?', 'Substituir'))) {
+      let who = 'Outro oficial';
+      if (!same) {
+        const last = (await api.eventLog(T.ev.id).catch(() => [])).find((x) => x.kind === 'room' && x.actor && x.actor !== state.user.id);
+        if (last) who = `${nameOf(last.actor)} (às ${fmtTime(last.at)})`;
+      }
+      if (!same && !(await confirmDialog(`${who} alterou estes times depois que você abriu a página. Salvar agora vai substituir essas alterações. Continuar?`, 'Substituir'))) {
         renderTeams(); return;
       }
       // Quem desmarcou presença nesse meio-tempo fica de fora
@@ -3089,8 +3284,47 @@
         const deltaTxt = delta ? ` <span class="${delta > 0 ? 'c-yes' : 'c-no'} small">(${delta > 0 ? '+' : ''}${fmtNum(delta)})</span>` : '';
         return `<li><span class="muted">${FIELD_LABEL[f]}:</span> <s>${esc(fmtField(f, o))}</s> → <b>${esc(fmtField(f, n))}</b>${deltaTxt}</li>`;
       }).join('');
-      return `<div class="hist-item"><div class="hist-date">${esc(new Date(h.changed_at).toLocaleDateString('pt-BR'))} · ${fmtTime(h.changed_at)}</div><ul>${lines}</ul></div>`;
+      // Alteração feita por outra pessoa (ex.: oficial trocou o nick): mostra quem
+      const by = h.changed_by && h.changed_by !== h.user_id ? ` · por ${esc(nameOf(h.changed_by))}` : '';
+      return `<div class="hist-item"><div class="hist-date">${esc(new Date(h.changed_at).toLocaleDateString('pt-BR'))} · ${fmtTime(h.changed_at)}${by}</div><ul>${lines}</ul></div>`;
     }).join('');
+  }
+
+  // ---------- Editar o nick de um membro (oficiais e líder) ----------
+  // Oficial: membros, quem aguarda aprovação e ex-membros. Líder: qualquer um. O próprio nick: em "Editar perfil".
+  const canRename = (m) => !!m && m.id !== state.user.id
+    && (isLeader() || (can('member_rename') && ['pending', 'member', 'former'].includes(m.role)));
+  function openRenameDialog(m, after) {
+    openDialog(`<form id="rn" class="stack">
+      <h2>Editar nick</h2>
+      <p class="muted small" style="margin:0">Nome que aparece no site para <b>${esc(displayName(m))}</b>${m.discord_name ? ` (Discord: ${esc(m.discord_name)})` : ''}.
+        A troca fica no histórico do membro, com o seu nome.</p>
+      <div class="field">
+        <label for="rn-name">Nick / nome do personagem</label>
+        <input id="rn-name" maxlength="40" required value="${esc(m.game_name || '')}" placeholder="${esc(m.discord_name || 'Nome no jogo')}">
+      </div>
+      <div class="row end">
+        <button type="button" class="btn ghost" data-close>Cancelar</button>
+        <button type="submit" class="btn primary">Salvar</button>
+      </div>
+    </form>`, (d) => {
+      const input = $('#rn-name', d);
+      input.focus(); input.select();
+      $('#rn', d).addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const name = input.value.trim();
+        if (!name) { toast('Escreva o nick', true); return; }
+        if (name === (m.game_name || '')) { dlg.close(); return; }
+        const btn = $('button[type=submit]', d);
+        btn.disabled = true;
+        try {
+          await api.renameMember(m.id, name);
+          dlg.close();
+          toast(`Nick alterado para “${name}”`);
+          await after?.();
+        } catch (err) { fail(err); btn.disabled = false; }
+      });
+    });
   }
 
   function openHistory(m, entries) {
@@ -3149,20 +3383,24 @@
   }
 
   // Reduz imagens muito grandes antes do envio (economiza espaço; GIF fica como está para manter a animação)
+  // Toda imagem é redesenhada antes do envio: isso reduz o tamanho e APAGA os metadados
+  // da foto (EXIF: localização GPS, modelo do celular, data), inclusive em tickets anônimos.
   async function prepareImage(file) {
     const MAX_W = 2000;
-    const MAX_BYTES = 1.5 * 1024 * 1024;
-    if (file.type === 'image/gif') return file;
+    if (file.type === 'image/gif') return file; // GIF não guarda localização; redesenhar perderia a animação
     const img = await createImageBitmap(file).catch(() => null);
-    if (!img) return file;
-    if (file.size <= MAX_BYTES && img.width <= MAX_W) return file;
+    if (!img) throw new Error('Não foi possível ler esta imagem. Use uma imagem JPG, PNG ou WebP.');
     const scale = Math.min(1, MAX_W / img.width);
     const canvas = document.createElement('canvas');
     canvas.width = Math.round(img.width * scale);
     canvas.height = Math.round(img.height * scale);
     canvas.getContext('2d').drawImage(img, 0, 0, canvas.width, canvas.height);
-    const blob = await new Promise((r) => canvas.toBlob(r, 'image/webp', 0.9));
-    return blob && blob.size < file.size ? new File([blob], 'malah-news.webp', { type: 'image/webp' }) : file;
+    const toBlob = (type, q) => new Promise((r) => canvas.toBlob(r, type, q));
+    let blob = await toBlob('image/webp', 0.9);
+    if (!blob || blob.type !== 'image/webp') blob = await toBlob('image/jpeg', 0.9); // navegadores sem WebP
+    if (!blob) throw new Error('Não foi possível preparar esta imagem para envio.');
+    const ext = blob.type === 'image/webp' ? 'webp' : 'jpg';
+    return new File([blob], `imagem.${ext}`, { type: blob.type });
   }
 
   async function viewNews() {
@@ -3589,6 +3827,53 @@
   const supportOn = () => TICKETS_ON && isOfficer() && can('ticket_view');
   const ticketBadgeMine = () => (state.tickets || []).filter(ticketHasNews).length;
   const ticketBadgeStaff = () => (supportOn() ? (state.tickets || []).filter(ticketAwaiting).length + ticketBadgeMine() : 0);
+  // Contador no botão 💬 da Central de Atendimento
+  function updateHelpFab() {
+    const fab = $('#help-fab');
+    if (!fab) return;
+    let b = fab.querySelector('.help-fab-badge');
+    if (!b) { b = document.createElement('span'); b.className = 'help-fab-badge'; fab.appendChild(b); }
+    const n = supportOn() ? ticketBadgeStaff() : ticketBadgeMine();
+    b.hidden = !n;
+    b.textContent = n > 99 ? '99+' : String(n);
+    const mine = ticketBadgeMine();
+    fab.title = mine ? `Central de Atendimento: a staff respondeu ${mine === 1 ? '1 ticket seu' : `${mine} tickets seus`}`
+      : supportOn() ? 'Central de Atendimento: tickets dos membros' : 'Central de Atendimento: fale com a liderança';
+  }
+  // Aviso na tela quando a staff responde um ticket meu (uma vez por resposta, também entre visitas)
+  const tkToastKey = () => `tk-toasted-${state.user?.id}`;
+  function notifyTicketReplies() {
+    if (!TICKETS_ON || !state.user || !isMember()) return;
+    let done = {};
+    try { done = JSON.parse(localStorage.getItem(tkToastKey()) || '{}') || {}; } catch { done = {}; }
+    const here = parseRoute().tk;
+    const fresh = (state.tickets || []).filter((t) => ticketHasNews(t) && !(here && Number(here[1]) === t.id)
+      && done[t.id] !== lastPublic(t)?.created_at);
+    if (!fresh.length) return;
+    fresh.forEach((t) => { done[t.id] = lastPublic(t).created_at; });
+    try { localStorage.setItem(tkToastKey(), JSON.stringify(done)); } catch { /* ignora */ }
+    toast(fresh.length === 1
+      ? `💬 A staff respondeu seu ticket “${fresh[0].title}”. Toque no 💬 para ver.`
+      : `💬 A staff respondeu ${fresh.length} tickets seus. Toque no 💬 para ver.`);
+  }
+  // Enquanto o site está aberto, confere novas respostas a cada minuto (e ao voltar para a aba)
+  let ticketPollBusy = false;
+  async function pollTickets() {
+    if (ticketPollBusy || document.hidden || !TICKETS_ON || !state.user || !isMember()) return;
+    ticketPollBusy = true;
+    try {
+      const here = parseRoute().tk;
+      const count = (id) => (state.tickets || []).find((t) => t.id === id)?.messages?.length || 0;
+      const before = here ? count(Number(here[1])) : 0;
+      await loadTickets();
+      renderBell();
+      notifyTicketReplies();
+      // Na conversa aberta, mostra a mensagem nova (se a pessoa não estiver escrevendo)
+      if (here && count(Number(here[1])) !== before && !$('#tk-body')?.value.trim()) await viewTicket(Number(here[1]));
+    } catch (e) { console.warn('tickets', e); } finally { ticketPollBusy = false; }
+  }
+  setInterval(pollTickets, 60000);
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) pollTickets(); });
   const ownerLabel = (t) => (t.assigned_to === state.user.id ? 'Com você' : `Responsável: ${nameOf(t.assigned_to)}`);
   function ticketAuthorLabel(t) {
     if (t.mine) return t.anonymous ? 'Você (anônimo)' : 'Você';
@@ -3615,15 +3900,34 @@
       ? `<span class="tk-owner${t.assigned_to === state.user.id ? ' me' : ''}">👤 ${esc(ownerLabel(t))}</span>`
       : '<span class="tk-owner none">👤 Sem responsável</span>';
   }
+  // Histórico de status: quem encerrou ou reabriu (o jogador que abriu ou a staff)
+  const lastClose = (t) => (t.status === 'resolved' ? [...(t.log || [])].reverse().find((l) => l.to_status === 'resolved') : null);
+  function tkWho(t, l) {
+    if (l.by_author) return t.mine ? 'por você' : `pelo jogador${t.author_id ? ` (${nameOf(t.author_id)})` : t.anonymous ? ' (anônimo)' : ''}`;
+    if (!l.actor) return '';
+    return l.actor === state.user.id ? 'por você (staff)' : `pela staff (${nameOf(l.actor)})`;
+  }
+  function tkLogText(t, l) {
+    const who = tkWho(t, l);
+    const w = who ? ` ${who}` : '';
+    if (l.to_status === 'resolved') return `✔ Encerrado${w}`;
+    if (l.from_status === 'resolved') return `↺ Reaberto${w}`;
+    if (l.to_status === 'progress') return `💬 Colocado em atendimento${w}`;
+    return `Voltou para Aberto${w}`;
+  }
+  const closedLine = (t) => { const l = lastClose(t); return l ? `${tkLogText(t, l)} em ${fmtWhen(l.at)}` : ''; };
+
   function ticketRowHtml(t, staff) {
     const cat = TICKET_CAT[t.category] || TICKET_CAT.other;
     const n = t.messages.filter((m) => !m.internal).length;
+    const closed = closedLine(t);
     return `<a class="card tk-row" href="#/ticket/${t.id}">
       <span class="rc-icon" aria-hidden="true">${cat.icon}</span>
       <div class="rc-body">
         <div class="tk-row-top"><div class="tk-title">${esc(t.title)}</div>${staff ? ownerTag(t) : ''}</div>
         <div class="rc-badges">${ticketBadges(t, staff)}</div>
         <div class="muted small">${staff ? `Aberto por <b>${esc(ticketAuthorLabel(t))}</b> · ` : ''}${n} mensage${n === 1 ? 'm' : 'ns'} · atualizado ${esc(fmtWhen(lastActivity(t)))}${!staff && t.assigned_to ? ` · com ${esc(nameOf(t.assigned_to))}` : ''}</div>
+        ${closed ? `<div class="tk-closed small">${esc(closed)}</div>` : ''}
       </div>
     </a>`;
   }
@@ -3772,14 +4076,23 @@
       if (m.from_author) return t.mine ? 'Você' : ticketAuthorLabel(t);
       return m.author_id === state.user.id ? 'Você' : nameOf(m.author_id);
     };
-    const msgs = t.messages.map((m) => {
+    const msgHtml = (m) => {
       const me = m.author_id === state.user.id || (t.mine && m.from_author);
       return `<div class="tk-msg${me ? ' me' : ''}${m.internal ? ' internal' : ''}${m.from_author ? '' : ' staff'}">
         <div class="tk-msg-head"><b>${esc(who(m))}</b>${!m.from_author ? ' <span class="tk-role">Liderança</span>' : ''}${m.internal ? ' <span class="tk-int">🔒 Nota interna</span>' : ''}<span class="muted small">${esc(fmtWhen(m.created_at))}</span></div>
         ${m.body ? `<div class="tk-text">${esc(m.body)}</div>` : ''}
         ${imagesHtml(m.images)}
       </div>`;
-    }).join('');
+    };
+    // Mensagens e mudanças de status (encerrado, reaberto…) na ordem em que aconteceram
+    const logHtml = (l) => `<div class="tk-event${l.to_status === 'resolved' ? ' done' : ''}"><span>${esc(tkLogText(t, l))}</span><span class="muted small">${esc(fmtWhen(l.at))}</span></div>`;
+    const msgs = [
+      ...t.messages.map((m) => ({ at: Date.parse(m.created_at), html: msgHtml(m) })),
+      ...(t.log || []).map((l) => ({ at: Date.parse(l.at), html: logHtml(l) })),
+    ].sort((a, b) => a.at - b.at).map((x) => x.html).join('');
+    const closed = closedLine(t);
+    const closedNote = t.status !== 'resolved' ? ''
+      : `<p class="small rc-note ok">${closed ? esc(closed) : '✔ Ticket encerrado (antes do histórico existir, sem registro de quem encerrou)'}.${!staff ? ' Se precisar, escreva abaixo que ele é reaberto.' : ''}</p>`;
 
     const controls = [];
     if (staff) {
@@ -3803,7 +4116,7 @@
         <div class="muted small">Aberto por <b>${esc(ticketAuthorLabel(t))}</b> em ${esc(fmtWhen(t.created_at))}${!staff && t.assigned_to ? ` · Responsável: <b>${esc(nameOf(t.assigned_to))}</b>` : ''}</div>
         ${staff && state.revealed[t.id] ? `<p class="small rc-note">🕶️ Autor: <b>${esc(nameOf(state.revealed[t.id]))}</b>. Só você está vendo; nada fica registrado no ticket.</p>` : ''}
         ${t.mine && t.anonymous ? '<p class="small rc-note">🕶️ Seu nome fica oculto para os oficiais e o líder. Em casos graves, o líder pode ver quem abriu.</p>' : ''}
-        ${!staff && t.status === 'resolved' ? '<p class="small rc-note">✔ Ticket resolvido. Se precisar, escreva abaixo que ele é reaberto.</p>' : ''}
+        ${closedNote}
         ${controls.length ? `<div class="row tk-controls">${controls.join('')}</div>` : ''}
       </div>
       <div class="tk-thread">${msgs}</div>
@@ -4010,7 +4323,8 @@
             <div class="muted small">${me.game_name ? `${esc(me.discord_name)} · ` : ''}${ROLE_LABEL[me.role]}${me.created_at ? ` · no clã desde ${new Date(me.created_at).toLocaleDateString('pt-BR')}` : ''}${phone ? ` · <a href="tel:${esc(phone.replace(/[^\d+]/g, ''))}">📞 ${esc(phone)}</a>` : ''}</div>
             ${me.char_class ? `<div class="member-build">${classTag(me.char_class)} <span>${esc(CLASS[me.char_class].label)}</span><span class="chip-stats">${statsLine(me)}</span></div>` : ''}
           </div>
-          ${self ? '<button class="btn small" id="btn-edit-pf">✎ Editar perfil</button>' : ''}
+          ${self ? `<div class="row me-actions"><button class="btn small" id="btn-photo-pf">📷 ${me.custom_avatar_url ? 'Trocar foto' : 'Enviar foto'}</button><button class="btn small" id="btn-edit-pf">✎ Editar perfil</button></div>`
+            : canRename(me) ? '<button class="btn small" id="btn-rename">✎ Editar nick</button>' : ''}
         </div>
       </div>
 
@@ -4055,7 +4369,18 @@
       ${ticketsCard(me, self)}
       ${showNotes ? notesCard(me, allNotes.filter((n) => n.member_id === me.id), members) : ''}`;
 
-    $('#btn-edit-pf')?.addEventListener('click', openProfile);
+    $('#btn-edit-pf')?.addEventListener('click', () => openProfile());
+    // Trocar a foto direto do painel, sem abrir o formulário
+    $('#btn-photo-pf')?.addEventListener('click', (e) => {
+      const btn = e.currentTarget;
+      pickImageFile(async (file) => {
+        const label = btn.textContent;
+        btn.disabled = true; btn.textContent = 'Enviando…';
+        try { if (await uploadAvatarFile(file)) await viewMyPanel(userId); } catch (err) { fail(err); }
+        finally { if (document.body.contains(btn)) { btn.disabled = false; btn.textContent = label; } }
+      });
+    });
+    $('#btn-rename')?.addEventListener('click', () => openRenameDialog(me, () => viewMyPanel(userId)));
     $('#btn-pr-fill')?.addEventListener('click', openProfile);
     $('#btn-pr-info')?.addEventListener('click', () => openPowerInfo(me));
     bindEvo(me, myChanges, self);
@@ -4534,11 +4859,14 @@
   function openAskPilotDialog(after) {
     const taken = new Set(state.pilots.filter((p) => p.pilot_id === state.user.id).map((p) => p.account_id));
     const list = activeMembers().filter((m) => m.id !== state.user.id && !taken.has(m.id)).sort(byName);
+    // Membro comum busca a conta pelo nick (mínimo de 3 letras)
+    const search = !isOfficer();
     openDialog(`
       <form id="ap-form" class="stack">
         <h2>Pedir acesso a uma conta</h2>
         <p class="small" style="margin:0">Escolha a conta que você também joga. O <b>dono da conta</b> aprova no perfil dele; se ele não puder, um oficial ou o líder aprova.</p>
-        ${memberPickerHtml(list)}
+        ${search ? `<input type="search" id="ap-q" placeholder="Digite o nick da conta (mínimo 3 letras)…" autocomplete="off">
+          <div class="picker" id="ap-results"><p class="muted small">Digite pelo menos 3 letras do nick.</p></div>` : memberPickerHtml(list)}
         <div class="field"><label for="ap-reason">Motivo <span class="muted small">(opcional)</span></label>
           <textarea id="ap-reason" maxlength="300" placeholder="Ex.: jogo na conta dele nas Guerras"></textarea></div>
         <div class="row end">
@@ -4547,6 +4875,28 @@
         </div>
       </form>`, (d) => {
       bindPicker(d);
+      const q = $('#ap-q', d);
+      if (q) {
+        const box = $('#ap-results', d);
+        let timer = null; let seq = 0;
+        q.addEventListener('input', () => {
+          clearTimeout(timer);
+          const text = q.value.trim();
+          if (text.length < 3) { box.innerHTML = '<p class="muted small">Digite pelo menos 3 letras do nick.</p>'; return; }
+          timer = setTimeout(async () => {
+            const mine = ++seq;
+            box.innerHTML = '<p class="muted small">Buscando…</p>';
+            let found = [];
+            try { found = await api.findAccounts(text); } catch (err) { fail(err); }
+            if (mine !== seq) return; // chegou uma busca mais nova
+            found = found.filter((m) => !taken.has(m.id));
+            box.innerHTML = found.length ? found.map((m) => `<label class="pick-row">
+                <input type="radio" name="pk" value="${esc(m.id)}" required> ${avatar(m)}<span>${esc(displayName(m))}</span>${m.char_class ? classTag(m.char_class) : ''}
+              </label>`).join('') : '<p class="muted small">Nenhuma conta encontrada com esse nick.</p>';
+          }, 350);
+        });
+        q.focus();
+      }
       $('#ap-form', d).addEventListener('submit', async (e) => {
         e.preventDefault();
         const id = d.querySelector('input[name="pk"]:checked')?.value;
@@ -4838,6 +5188,7 @@
   // ---------- Utils: links úteis (todos os membros) ----------
 
   const UTIL_LINKS = [
+    { icon: '🛡️', title: 'Discord da Aliança', desc: 'Servidor da nossa aliança no Discord', url: 'https://discord.gg/YncQxQ4bzB' },
     { icon: '⚔️', title: 'Builds', desc: 'Builds das classes, com itens e gemas recomendados', url: 'https://diablo.tv/builds' },
     { icon: '💎', title: 'Gemas', desc: 'Lista das gemas lendárias e seus efeitos', url: 'https://diablo.tv/legendary-gems' },
     { icon: '🏆', title: 'Rank PvP Mundial', desc: 'Ranking mundial dos jogadores', url: 'https://diablo.tv/leaderboards' },
@@ -5057,7 +5408,7 @@
       <div class="name"><a class="member-link" href="#/membro/${encodeURIComponent(m.id)}">${esc(displayName(m))}</a>${medalsHtml(m.id)} ${absTag(m)} ${noteBadge(m)} ${pilotLabel(m)} ${formerly(m)}
         <small>${m.managed ? 'conta sem login' : (m.game_name ? esc(m.discord_name) : '')} ${phoneLink(m)}</small>
         ${m.char_class ? `<div class="member-build">${classTag(m.char_class)} <span>${esc(CLASS[m.char_class].label)}</span><span class="chip-stats">${statsLine(m)}</span></div>` : '<div class="member-build muted small">Classe e atributos não informados</div>'}
-      </div>${histBtn(m)}${ctrl}</div>`;
+      </div>${canRename(m) ? `<button class="btn small ghost" data-rename="${esc(m.id)}" title="Editar o nick de ${esc(displayName(m))}">✎ Nick</button>` : ''}${histBtn(m)}${ctrl}</div>`;
 
     main.innerHTML = `
       <div class="page-head"><h1>Membros</h1><span class="muted">${active.length} ativos</span>
@@ -5125,6 +5476,10 @@
     applySearch();
     main.querySelectorAll('[data-history]').forEach((b) => b.addEventListener('click', () => {
       openHistory(state.members.find((x) => x.id === b.dataset.history), histBy[b.dataset.history] || []);
+    }));
+    main.querySelectorAll('[data-rename]').forEach((b) => b.addEventListener('click', () => {
+      const m = [...pending, ...active, ...former].find((x) => x.id === b.dataset.rename);
+      if (m) openRenameDialog(m, () => viewMembers());
     }));
     $('#btn-csv')?.addEventListener('click', async (e) => {
       e.target.disabled = true;
@@ -5274,6 +5629,49 @@
     return blob;
   }
 
+  // Foto de perfil: salva na hora e atualiza o topo e a lista de membros
+  async function saveAvatar(blob, hidden, msg) {
+    const url = await api.setAvatar(blob, hidden);
+    const patch = { custom_avatar_url: url, avatar_hidden: !blob && hidden };
+    Object.assign(state.me, patch);
+    const m = memberById(state.me.id);
+    if (m) Object.assign(m, patch);
+    toast(msg);
+    renderHeader(currentRouteKey());
+  }
+  // Abre o seletor de arquivos do aparelho (celular: galeria ou câmera)
+  function pickImageFile(onFile) {
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = 'image/*';
+    input.addEventListener('change', () => { const f = input.files?.[0]; if (f) onFile(f); }, { once: true });
+    input.click();
+  }
+  // Recorta e envia a foto escolhida. Devolve true se a foto foi trocada.
+  async function uploadAvatarFile(file) {
+    // Alguns celulares não informam o tipo do arquivo: nesse caso, tenta ler mesmo assim
+    if (file.type && !file.type.startsWith('image/')) { toast('Escolha um arquivo de imagem (JPG, PNG ou WebP)', true); return false; }
+    if (file.size > 15 * 1024 * 1024) { toast('Imagem muito grande (máximo 15 MB)', true); return false; }
+    let blob;
+    try { blob = await squareAvatar(file); } catch {
+      toast('Não foi possível ler esta imagem. Use uma foto JPG ou PNG (no iPhone, se for HEIC, tire um print da foto e envie o print).', true);
+      return false;
+    }
+    await saveAvatar(blob, false, 'Foto de perfil atualizada');
+    return true;
+  }
+  const photoBlockHtml = (me) => `
+    <span id="pf-avatar">${avatar(me, 'xl')}</span>
+    <div class="stack" style="gap:6px">
+      <div><strong>${esc(me.discord_name)}</strong><div class="muted small">${ROLE_LABEL[me.role]}</div></div>
+      <div class="row pf-photo-btns" style="gap:6px">
+        <button type="button" class="btn small" id="pf-pick">📷 ${me.custom_avatar_url ? 'Trocar foto' : 'Enviar foto'}</button>
+        ${!me.avatar_hidden && (me.custom_avatar_url || me.avatar_url) ? '<button type="button" class="btn small ghost danger" id="pf-remove">Remover foto</button>' : ''}
+        ${(me.custom_avatar_url || me.avatar_hidden) && me.avatar_url ? '<button type="button" class="btn small ghost" id="pf-discord">Usar foto do Discord</button>' : ''}
+      </div>
+      <div class="muted small">Use uma foto do seu computador ou celular. Ela é recortada em quadrado e salva na hora; o resto do formulário continua como está.</div>
+    </div>`;
+
   async function openProfile() {
     const me = state.me;
     let phone = '';
@@ -5281,19 +5679,7 @@
     openDialog(`
       <form id="pf" class="stack">
         <h2>Meu perfil</h2>
-        <div class="row pf-photo">
-          <span id="pf-avatar">${avatar(me, 'xl')}</span>
-          <div class="stack" style="gap:6px">
-            <div><strong>${esc(me.discord_name)}</strong><div class="muted small">${ROLE_LABEL[me.role]}</div></div>
-            <div class="row" style="gap:6px">
-              <label class="btn small" for="pf-file">📷 ${me.custom_avatar_url ? 'Trocar foto' : 'Enviar foto'}</label>
-              <input id="pf-file" type="file" accept="image/png,image/jpeg,image/webp,image/gif" hidden>
-              ${!me.avatar_hidden && (me.custom_avatar_url || me.avatar_url) ? '<button type="button" class="btn small ghost danger" id="pf-remove">Remover foto</button>' : ''}
-              ${(me.custom_avatar_url || me.avatar_hidden) && me.avatar_url ? '<button type="button" class="btn small ghost" id="pf-discord">Usar foto do Discord</button>' : ''}
-            </div>
-            <div class="muted small">Use uma foto do seu computador ou celular. Ela é recortada em quadrado.</div>
-          </div>
-        </div>
+        <div class="row pf-photo">${photoBlockHtml(me)}</div>
         <div class="grid2">
           <div class="field">
             <label for="f-game">Nome do personagem</label>
@@ -5311,37 +5697,29 @@
           <button type="submit" class="btn primary">Salvar</button>
         </div>
       </form>`, (d) => {
-      // Foto: salva na hora (independente do botão Salvar do formulário)
-      const applyAvatar = async (blob, hidden, msg) => {
-        d.querySelectorAll('.pf-photo .btn').forEach((b) => { b.disabled = true; b.classList.add('disabled'); });
-        try {
-          const url = await api.setAvatar(blob, hidden);
-          Object.assign(state.me, { custom_avatar_url: url, avatar_hidden: !blob && hidden });
-          const m = memberById(state.me.id);
-          if (m) Object.assign(m, { custom_avatar_url: url, avatar_hidden: !blob && hidden });
-          toast(msg);
-          renderHeader(currentRouteKey());
-          openProfile();
-        } catch (err) {
-          fail(err);
-          d.querySelectorAll('.pf-photo .btn').forEach((b) => { b.disabled = false; b.classList.remove('disabled'); });
-        }
+      // Foto: salva na hora e só o bloco da foto é redesenhado. O que já foi digitado
+      // no formulário (nome, telefone, classe e atributos) não é apagado.
+      const photo = $('.pf-photo', d);
+      const busy = (on) => photo.querySelectorAll('.btn').forEach((b) => { b.disabled = on; b.classList.toggle('disabled', on); });
+      const redraw = () => { photo.innerHTML = photoBlockHtml(state.me); bindPhoto(); };
+      const run = async (fn) => {
+        busy(true);
+        try { await fn(); redraw(); } catch (err) { fail(err); busy(false); }
       };
-      $('#pf-file', d).addEventListener('change', async (e) => {
-        const file = e.target.files?.[0];
-        e.target.value = '';
-        if (!file) return;
-        if (!file.type.startsWith('image/')) { toast('Escolha um arquivo de imagem (JPG, PNG ou WebP)', true); return; }
-        if (file.size > 15 * 1024 * 1024) { toast('Imagem muito grande (máximo 15 MB)', true); return; }
-        let blob;
-        try { blob = await squareAvatar(file); } catch { toast('Não foi possível ler esta imagem. Tente uma foto JPG ou PNG.', true); return; }
-        await applyAvatar(blob, false, 'Foto de perfil atualizada');
-      });
-      $('#pf-remove', d)?.addEventListener('click', async () => {
-        if (!(await confirmDialog('Remover sua foto de perfil? No lugar dela vai aparecer a inicial do seu nome.', 'Remover foto'))) { openProfile(); return; }
-        await applyAvatar(null, true, 'Foto removida');
-      });
-      $('#pf-discord', d)?.addEventListener('click', () => applyAvatar(null, false, 'Voltou a foto do Discord'));
+      function bindPhoto() {
+        $('#pf-pick', photo).addEventListener('click', () => pickImageFile((file) => run(() => uploadAvatarFile(file))));
+        $('#pf-discord', photo)?.addEventListener('click', () => run(() => saveAvatar(null, false, 'Voltou a foto do Discord')));
+        // Confirmação dentro do próprio bloco (sem trocar a janela do formulário)
+        $('#pf-remove', photo)?.addEventListener('click', () => {
+          const btns = $('.pf-photo-btns', photo);
+          btns.innerHTML = `<span class="small">Remover sua foto? No lugar dela aparece a inicial do seu nome.</span>
+            <button type="button" class="btn small ghost" id="pf-rm-no">Cancelar</button>
+            <button type="button" class="btn small danger" id="pf-rm-yes">Remover foto</button>`;
+          $('#pf-rm-no', photo).addEventListener('click', redraw);
+          $('#pf-rm-yes', photo).addEventListener('click', () => run(() => saveAvatar(null, true, 'Foto removida')));
+        });
+      }
+      bindPhoto();
       $('#pf', d).addEventListener('submit', async (e) => {
         e.preventDefault();
         const submit = $('button[type=submit]', d);
@@ -5450,7 +5828,7 @@
       mine.push({ icon: '📅', text: `Responder: <b>${esc(ev.title)}</b>`, sub: `${esc(fmtWhenShort(ev.starts_at))}${d ? ` · responda até ${esc(fmtDeadline(d))}` : ''}${who}`, href: `#/evento/${ev.id}` });
     });
     (state.tickets || []).filter(ticketHasNews).forEach((t) => {
-      mine.push({ icon: '💬', text: `Resposta nova no ticket <b>${esc(t.title)}</b>`, href: `#/ticket/${t.id}` });
+      mine.push({ icon: '💬', text: `A staff respondeu seu ticket <b>${esc(t.title)}</b>`, sub: 'Toque para ver a resposta', href: `#/ticket/${t.id}` });
     });
     (state.recruits || []).filter((r) => isMyRecruit(r) && r.status === 'open' && recruitApps(r, 'applied').length).forEach((r) => {
       mine.push({ icon: '📣', text: `${plural(recruitApps(r, 'applied').length, 'candidato aguardando', 'candidatos aguardando')} você`, sub: `Recrutamento “${esc(r.title)}”`, href: `#/recrutamento/${r.id}` });
@@ -5514,6 +5892,7 @@
 
   let bellOpen = false;
   function renderBell() {
+    updateHelpFab();
     const wrap = $('#bell-wrap');
     if (!wrap) return;
     const { mine, lead } = bellItems();
@@ -5565,6 +5944,7 @@
     if (!state.user) return viewLogin();
     if (!isMember()) return state.me?.role === 'former' ? viewFormer() : viewPending();
     if (myLeave()) return viewLeaving();
+    notifyTicketReplies();
     try {
       if (key === 'past') await viewEvents(true);
       else if (key === 'news') await viewNews();

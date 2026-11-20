@@ -75,8 +75,11 @@ Mande o link no Discord do clã. Cada pessoa entra com o Discord e aparece em **
 | Ver a lista de membros e os telefones | | ✔ | ✔ |
 | Criar / editar / apagar eventos | | ✔ | ✔ |
 | Montar times | | ✔ | ✔ |
+| Ver o histórico de alterações do evento e quem alterou cada sala por último | | ✔ | ✔ |
 | Registrar presença real e ver a frequência | | ✔ | ✔ |
 | Aprovar, recusar ou remover membros comuns | | ✔ | ✔ |
+| Editar o nick de membros comuns (e de quem aguarda aprovação) | | ✔ | ✔ |
+| Editar o nick de oficiais | | | ✔ |
 | Remover oficiais e readmitir ex-membros | | | ✔ |
 | Promover a oficial ou líder | | | ✔ |
 
@@ -103,6 +106,8 @@ A sugestão entra como **rascunho**: ajuste o que quiser e clique em **💾 Salv
 **⏳ Prazo para responder:** ao criar ou editar um evento, escolha até quando os membros podem responder (ex.: "2h antes", que é o padrão; ou "Sem prazo").
 Os cards mostram "⏳ Responda até …". Depois do prazo, aparece "⛔ Respostas encerradas" e os membros não conseguem mais mudar a resposta.
 
+**Próximos → Passados:** quando o evento começa, o card ganha o selo **Agora**. **20 minutos depois do horário de início**, o evento sai de **Próximos** e vai sozinho para **Passados**, mesmo com a página aberta.
+
 **🔒 Travar times:** no painel de montagem, o botão **🔓 Travar times** trava os times. Com os times travados, quem está escalado não sai sozinho: o botão "Não vou" vira **"Não vou poder ir…"**, e o membro informa o motivo.
 Quem não está escalado continua respondendo normalmente enquanto o prazo estiver aberto. Oficiais e o líder continuam podendo editar os times e mudar a própria resposta.
 
@@ -122,7 +127,9 @@ O site não manda notificação; use **📋 Copiar times** para avisar no Discor
 
 **Meu perfil** (menu do topo, para todos: membros, oficiais e líder): é o painel individual de cada um.
 Oficiais e líder também abrem o **perfil de qualquer membro**: basta clicar no membro na lista de **Membros** ou no nome dele na tabela de **Frequência**.
-Nesse caso, o painel também mostra o telefone (se informado) e o botão "← Membros" para voltar, mas não tem "Editar perfil", porque cada um edita só o próprio.
+Nesse caso, o painel também mostra o telefone (se informado) e o botão "← Membros" para voltar, mas não tem "Editar perfil", porque cada um edita só o próprio (a staff pode trocar só o nick, em **✎ Editar nick**).
+No próprio painel, o botão **📷 Trocar foto** troca a foto de perfil na hora, sem abrir o formulário. Ela também pode ser trocada em **✎ Editar perfil**.
+Trocar ou remover a foto nesse formulário não apaga o que já foi digitado (nome, telefone, classe e atributos), inclusive no cadastro de quem acabou de entrar.
 Membros comuns não conseguem abrir o perfil de outra pessoa. O painel mostra:
 - os dados do membro, com um botão para editar o perfil;
 - a frequência no período escolhido, as presenças, a sequência atual de presenças e quantas vezes confirmou e faltou;
@@ -130,6 +137,15 @@ Membros comuns não conseguem abrir o perfil de outra pessoa. O painel mostra:
 - os 5 atributos comparados com a média do clã;
 - os últimos eventos, com o resultado de cada um (presente, confirmou e faltou, avisou, faltou sem responder);
 - o histórico das próprias alterações de nome, classe e atributos. Se alguém mudar a resposta para "Não vou", sai do time automaticamente.
+
+**🕘 Histórico de alterações do evento** (oficiais e líder): na página do evento, o botão **🕘 Histórico de alterações** mostra quem mudou o quê, do mais recente para o mais antigo, com o nome, o cargo, a data e a hora:
+- criação do evento e edições (nome, data, tipo, prazo para responder e descrição);
+- formato dos times, times renomeados, times travados e destravados;
+- cada sala (ex.: Exaltação 1): quem entrou e quem saiu. Saídas automáticas (o membro marcou "Não vou" ou teve a saída aceita) aparecem identificadas.
+
+Em cada sala, na página do evento e no painel **⚔ Montar times**, aparece **✎ Nome · data e hora** do **último oficial ou líder** que alterou aquela sala.
+Se outro oficial salvar os times enquanto você edita, o aviso antes de substituir diz quem foi e a que horas.
+Os membros comuns não veem o histórico. Ele começa a contar a partir de quando o [`supabase/historico_eventos.sql`](supabase/historico_eventos.sql) for executado (veja **Dicas**).
 
 **Registrar presença** (oficial ou líder): depois que o evento começa, ele mostra o aviso **📋 Registrar presença**.
 A lista já vem marcada com quem confirmou "Vou"; basta desmarcar quem faltou e marcar quem apareceu sem avisar.
@@ -181,6 +197,11 @@ Só contam eventos com presença registrada e posteriores à entrada do membro. 
 
 ## Dicas
 - **Atualizando o site:** se você já tinha executado uma versão anterior do `schema.sql`, rode o arquivo inteiro de novo no SQL Editor. Ele só acrescenta o que falta e não apaga dados. Ao publicar arquivos novos, aumente o número `?v=` no `index.html` para os navegadores baixarem a versão nova.
+- **Ativar o histórico de alterações dos eventos:** no Supabase, abra o **SQL Editor**, cole todo o conteúdo de [`supabase/historico_eventos.sql`](supabase/historico_eventos.sql) e clique em **Run**. Ele só acrescenta o que falta, pode ser executado de novo e também está no fim do `schema.sql`. Enquanto ele não for executado, o site funciona normalmente, só sem o histórico.
+- **Ativar o histórico de quem encerrou os tickets:** do mesmo jeito, cole todo o conteúdo de [`supabase/tickets_historico.sql`](supabase/tickets_historico.sql) no **SQL Editor** e clique em **Run**. Ele também só acrescenta o que falta, pode ser executado de novo e está no fim do `schema.sql`.
+- **Ativar a edição de nick pela staff:** cole todo o conteúdo de [`supabase/editar_nick.sql`](supabase/editar_nick.sql) no **SQL Editor** e clique em **Run**. Ele só acrescenta uma função, pode ser executado de novo e está no fim do `schema.sql`. A permissão fica em **⚙️ Configurações → Membros → Editar o nick dos membros**.
+- **Pedido de piloto pela busca do nick:** rode o [`supabase/busca_conta.sql`](supabase/busca_conta.sql) no **SQL Editor**. O membro comum digita pelo menos 3 letras do nick da conta (até 8 resultados). Pode ser executado de novo e está no fim do `schema.sql`.
+- **Foto de perfil só do site:** rode o [`supabase/foto_perfil.sql`](supabase/foto_perfil.sql) no **SQL Editor**. A foto de perfil passa a aceitar só endereços do espaço de fotos do próprio Supabase; endereços de fora são removidos e a pessoa volta para a foto do Discord. As imagens de tickets e da Malah News são redesenhadas antes do envio, o que apaga os metadados (localização GPS, modelo do celular). No `index.html`, o supabase-js tem verificação de integridade (`integrity`) e há uma `Content-Security-Policy`: ao trocar o projeto do Supabase ou a versão do supabase-js, atualize o endereço e o hash ali.
 - **Eventos semanais:** ao criar, escolha "Repetir por N semanas"; ou, num evento existente, use "Repetir na próxima semana".
 - **Horários:** cada pessoa vê o horário no fuso do próprio celular ou PC.
 - **Link direto:** "Copiar link" na página do evento gera um link para mandar no Discord.
