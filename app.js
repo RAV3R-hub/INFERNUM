@@ -104,6 +104,13 @@
     return c.slice(0, 2).join('') + '*'.repeat(c.length - 3) + c[c.length - 1];
   }).join(' ');
 
+  // O que o membro comum recebe do perfil dos outros (igual à visão "member_directory" do banco)
+  const directoryRow = (p) => ({
+    id: p.id, discord_name: p.discord_name, game_name: p.game_name, role: p.role, managed: !!p.managed,
+    char_class: p.char_class, armor: p.armor, armor_pen: p.armor_pen, potency: p.potency, resistance: p.resistance, resonance: p.resonance,
+    avatar_url: p.avatar_hidden ? null : p.avatar_url, custom_avatar_url: p.avatar_hidden ? null : p.custom_avatar_url, avatar_hidden: !!p.avatar_hidden,
+  });
+
   function supabaseApi() {
     const sb = window.supabase.createClient(CFG.supabaseUrl, CFG.supabaseAnonKey, {
       auth: { flowType: 'pkce', detectSessionInUrl: true, persistSession: true },
@@ -136,7 +143,17 @@
       async verifyEmailCode(email, token) { ok(await sb.auth.verifyOtp({ email, token, type: 'email' })); },
       signOut() { return sb.auth.signOut(); },
       async myProfile() { return ok(await sb.from('profiles').select('*').eq('id', state.user.id).maybeSingle()); },
-      async members() { return ok(await sb.from('profiles').select('*')); },
+      // Oficiais e líder leem a tabela completa. O membro comum recebe completos só o próprio perfil e as
+      // contas que pilota; dos outros, a visão limitada "member_directory" (só membros ativos, sem data de
+      // cadastro e sem a foto que a pessoa removeu). Se o SQL novo ainda não rodou, a visão falha e fica o de antes.
+      async members() {
+        const rows = ok(await sb.from('profiles').select('*'));
+        if (['officer', 'leader'].includes(state.me?.role)) return rows;
+        const dir = await sb.from('member_directory').select('*');
+        if (dir.error) return rows;
+        const ids = new Set(rows.map((r) => r.id));
+        return rows.concat((dir.data || []).filter((r) => !ids.has(r.id)));
+      },
       async myPhone() { return ok(await sb.from('member_contacts').select('phone').eq('user_id', state.user.id).maybeSingle())?.phone ?? ''; },
       async contacts() { return ok(await sb.from('member_contacts').select('user_id, phone')); },
       async syncDiscord() { ok(await sb.rpc('sync_discord_profile')); },
@@ -471,7 +488,10 @@
     // O que cada um pode ver (igual às regras do banco): abertos para todos; pendentes, recusados e encerrados só para quem criou e os oficiais
     const listRecruits = () => db.recruits
       .filter((r) => r.status === 'open' || r.created_by === state.user.id || isOfficer())
-      .map((r) => ({ ...r, wanted: { ...r.wanted }, applications: db.applications.filter((a) => a.recruit_id === r.id).map((a) => ({ ...a })) }));
+      .map((r) => ({ ...r, wanted: { ...r.wanted }, applications: db.applications
+        // "Não selecionados": só a própria pessoa, quem criou e os oficiais
+        .filter((a) => a.recruit_id === r.id && (a.status !== 'declined' || a.user_id === state.user.id || r.created_by === state.user.id || isOfficer()))
+        .map((a) => ({ ...a })) }));
 
     // Tickets de exemplo
     const bugSvg = `<svg xmlns="http://www.w3.org/2000/svg" width="640" height="360"><rect width="640" height="360" fill="#1a0f0b"/><rect x="40" y="40" width="560" height="280" rx="12" fill="#2a1a14" stroke="#e0524a" stroke-width="3"/><text x="320" y="170" font-family="Arial" font-size="28" fill="#ffc9c0" text-anchor="middle">Erro ao confirmar presença</text><text x="320" y="215" font-family="Arial" font-size="18" fill="#cdbdb2" text-anchor="middle">(print de exemplo)</text></svg>`;
@@ -564,7 +584,12 @@
       },
       async signOut() { user = null; listener(null); },
       async myProfile() { return { ...profile(state.user.id) }; },
-      async members() { return db.profiles.map((p) => ({ ...p })); },
+      async members() {
+        if (isOfficer()) return db.profiles.map((p) => ({ ...p }));
+        // Igual às regras do banco para o membro comum
+        return db.profiles.filter((p) => canActAsDemo(p.id) || ACTIVE_ROLES.includes(p.role))
+          .map((p) => (canActAsDemo(p.id) ? { ...p } : directoryRow(p)));
+      },
       async myPhone() { return db.contacts.find((c) => c.user_id === state.user.id)?.phone ?? ''; },
       async contacts() { return db.contacts.map((c) => ({ ...c })); },
       async syncDiscord() { /* no modo demonstração não há Discord */ },
