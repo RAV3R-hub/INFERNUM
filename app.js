@@ -215,6 +215,13 @@
         ok(await sb.rpc('save_event_result', { p_event: eventId, p_outcome: o.outcome, p_opponent: o.opponent || null, p_us: o.score_us ?? null, p_them: o.score_them ?? null, p_notes: o.notes || null }));
       },
       async deleteResult(eventId) { ok(await sb.rpc('delete_event_result', { p_event: eventId })); },
+      // Ciclos do jogo (Sombras / Imortal), cadastrados pela liderança
+      async cycles() {
+        const r = await sb.from('clan_cycles').select('*').order('starts_on');
+        return r.error ? [] : r.data; // SQL novo ainda não rodado
+      },
+      async saveCycle(o) { ok(await sb.rpc('save_cycle', { p_id: o.id ?? null, p_starts_on: o.starts_on, p_side: o.side })); },
+      async deleteCycle(id) { ok(await sb.rpc('delete_cycle', { p_id: id })); },
       async saveProfile(fields, phone) {
         ok(await sb.from('profiles').update(fields).eq('id', state.user.id));
         if (phone !== undefined) ok(await sb.from('member_contacts').upsert({ user_id: state.user.id, phone: phone || null }));
@@ -410,12 +417,14 @@
         { id: 'u0', discord_name: 'Você (demo)', game_name: 'Sangrento', role: 'leader', created_at: longAgo, ...randomBuild() },
         ...NICKS.map((n, i) => ({
           id: `u${i + 1}`, discord_name: `${n.toLowerCase()}_br`, game_name: n, role: i === 0 ? 'officer' : 'member',
-          created_at: i === NICKS.length - 1 ? day(-4, 12) : longAgo, ...randomBuild(),
+          created_at: i === NICKS.length - 1 ? day(-4, 12) : ({ 30: day(-118, 20), 31: day(-74, 20), 32: day(-41, 20), 33: day(-14, 20) })[i] || longAgo, ...randomBuild(),
         })),
         { id: 'p1', discord_name: 'novato123', game_name: null, role: 'pending', created_at: day(-1, 12) },
         // Nick difícil de digitar, com codinome dado pela liderança (só para as buscas)
         { id: 'c1', discord_name: 'xx77', game_name: '藍月ღ✧', alias: 'Lua Azul', role: 'member', created_at: longAgo, ...randomBuild() },
         { id: 'f1', discord_name: 'desertor_br', game_name: 'Desertor', role: 'former', created_at: longAgo, ...randomBuild() },
+        { id: 'f2', discord_name: 'errante_br', game_name: 'Errante', role: 'former', created_at: day(-125, 20), ...randomBuild() },
+        { id: 'f3', discord_name: 'sussurro_br', game_name: 'Sussurro', role: 'former', created_at: longAgo, ...randomBuild() },
         // Conta sem login, pilotada pelo usuário da demonstração
         { id: 'm1', discord_name: '', game_name: 'Ceifador', role: 'member', managed: true, created_at: day(-30, 20), ...randomBuild() },
       ],
@@ -498,6 +507,8 @@
     addLog('u0', 'member', 'leader', new Date(Date.parse(longAgo) + 7200e3).toISOString(), null, null);
     addLog('u1', 'member', 'officer', day(-90, 20), 'u0');
     addLog('f1', 'member', 'former', day(-20, 21), 'u0', 'Inativo há 2 meses');
+    addLog('f2', 'member', 'former', day(-48, 21), 'u1', 'Mudou de clã');
+    addLog('f3', 'member', 'former', day(-9, 21), 'u0', 'Pediu para sair do clã: vai parar de jogar');
     // Pilotos: você pilota o "Ceifador" (sem login) e a conta do Rúnico; o Brasa pediu para pilotar a sua
     db.perms = {};
     db.requests = [];
@@ -536,6 +547,34 @@
         db.attendance.push({ event_id: id, user_id: p.id, present });
       });
     }
+
+    // Guerras semanais dos últimos ciclos (painel da liderança), com presença e resultado
+    const RIVALS = ['Legião Sombria', 'Os Imortais', 'Filhos de Lilith', 'Horda Rubra', 'Clã do Dragão'];
+    for (let w = 0; w < 19; w++) {
+      const id = 40 + w;
+      const starts = day(-7 * w - 5, 20, 30);
+      db.events.push({ id, title: 'Guerra de Clãs', description: '', starts_at: starts, team_format: null, team_count: 10 });
+      let present = 0, total = 0;
+      db.profiles.filter((p) => p.role !== 'pending' && Date.parse(p.created_at) < Date.parse(starts)).forEach((p) => {
+        const rel = reliability[p.id];
+        const x = rnd();
+        const going = x < rel ? true : x < rel + 0.15 ? false : null;
+        if (going !== null) answer(id, p.id, going);
+        const was = going === true ? rnd() < 0.5 + rel / 2 : going === false ? rnd() < 0.05 : rnd() < rel / 3;
+        db.attendance.push({ event_id: id, user_id: p.id, present: was });
+        total++; if (was) present++;
+      });
+      const win = rnd() < 0.15 + present / Math.max(1, total);
+      const us = win ? 4 + Math.floor(rnd() * 4) : Math.floor(rnd() * 4);
+      const them = win ? Math.floor(rnd() * us) : us + 1 + Math.floor(rnd() * 4);
+      db.results.push({ event_id: id, outcome: win ? 'win' : 'loss', opponent: RIVALS[Math.floor(rnd() * RIVALS.length)], score_us: us, score_them: them, updated_by: 'u0', updated_at: starts });
+    }
+    // Ciclos cadastrados pela liderança (o jogo alterna Sombras e Imortal)
+    const ymd = (d) => { const x = new Date(Date.now() + d * 86400000); x.setDate(x.getDate() - ((x.getDay() + 6) % 7)); return localDay(x); }; // segunda-feira daquela semana
+    db.cycles = [
+      { id: 600, starts_on: ymd(-135), side: 'immortal' }, { id: 601, starts_on: ymd(-96), side: 'shadows' },
+      { id: 602, starts_on: ymd(-54), side: 'immortal' }, { id: 603, starts_on: ymd(-19), side: 'shadows' },
+    ];
 
     // Resultados de duas Guerras passadas (as observações só a liderança vê)
     db.results.push(
@@ -890,6 +929,22 @@
         const out = [];
         for (const id of ids) { const r = await this.eventResult(id); if (r) out.push(r); }
         return out;
+      },
+      async cycles() { return isOfficer() ? db.cycles.map((c) => ({ ...c })).sort((a, b) => a.starts_on.localeCompare(b.starts_on)) : []; },
+      async saveCycle(o) {
+        if (!isOfficer()) throw new Error('Só oficiais e o líder gerenciam os ciclos');
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(o.starts_on || '')) throw new Error('Informe a data de início do ciclo');
+        if (!['shadows', 'immortal'].includes(o.side)) throw new Error('Escolha o lado do ciclo');
+        if (o.starts_on > localDay()) throw new Error('O ciclo não pode começar no futuro');
+        if (new Date(`${o.starts_on}T12:00:00`).getDay() !== 1) throw new Error('O ciclo sempre começa numa segunda-feira');
+        if (db.cycles.some((c) => c.starts_on === o.starts_on && c.id !== o.id)) throw new Error('Já existe um ciclo começando nesta data');
+        const c = o.id ? db.cycles.find((x) => x.id === o.id) : null;
+        if (c) Object.assign(c, { starts_on: o.starts_on, side: o.side });
+        else db.cycles.push({ id: db.nextId++, starts_on: o.starts_on, side: o.side, created_by: state.user.id, created_at: new Date().toISOString() });
+      },
+      async deleteCycle(id) {
+        if (!isOfficer()) throw new Error('Só oficiais e o líder gerenciam os ciclos');
+        db.cycles = db.cycles.filter((c) => c.id !== id);
       },
       async opponents() {
         return [...new Set(db.results.slice().sort((a, b) => Date.parse(b.updated_at) - Date.parse(a.updated_at)).map((r) => r.opponent).filter(Boolean))];
@@ -1277,6 +1332,10 @@
       { key: 'csv', label: 'Exportar lista em CSV', desc: 'Só esconde na tela' },
       { key: 'freq_view', label: 'Ver o painel de Frequência', desc: 'Só esconde na tela' },
     ] },
+    { group: 'Estatísticas', items: [
+      { key: 'panel_view', label: 'Ver o menu Estatísticas', desc: 'Ícone 📊 ao lado do sininho, com os indicadores por ciclo (só esconde na tela)' },
+      { key: 'cycles', label: 'Gerenciar ciclos', desc: 'Cadastrar, editar e apagar os ciclos (Sombras / Imortal)', approval: true },
+    ] },
     { group: 'Malah News', items: [
       { key: 'news_publish', label: 'Publicar e editar edições', approval: true },
       { key: 'news_delete', label: 'Apagar edições', approval: true },
@@ -1344,6 +1403,8 @@
     resolveWithdrawal: () => ['withdraw_decide'],
     setRole: (raw, id, role) => (role === 'member' && memberById(id)?.role === 'pending' ? ['member_approve', `Aprovar ${nameOf(id)} como membro do clã`] : null),
     removeMember: (raw, id, reason) => ['member_remove', `${memberById(id)?.role === 'pending' ? 'Recusar a entrada de' : 'Remover do clã'} ${nameOf(id)}${reason ? ` · motivo: “${reason}”` : ''}`],
+    saveCycle: (raw, o) => ['cycles', `${o?.id ? 'Editar o' : 'Cadastrar um'} ciclo ${o?.side === 'immortal' ? 'Imortal' : 'das Sombras'} começando em ${String(o?.starts_on || '').split('-').reverse().join('/')}`],
+    deleteCycle: () => ['cycles', 'Apagar um ciclo'],
     renameMember: (raw, id, name) => (id === state.user.id ? null : ['member_rename', `Trocar o nick de ${nameOf(id)} para “${String(name || '').trim()}”`]),
     setAlias: (raw, id, alias) => (id === state.user.id ? null : ['member_alias', String(alias || '').trim()
       ? `Definir o codinome de ${nameOf(id)} como “${String(alias).trim()}”` : `Apagar o codinome de ${nameOf(id)}`]),
@@ -1388,6 +1449,8 @@
     setRole: ([id]) => [String(id), 'member'],
     removeMember: ([id, reason, withManaged]) => [String(id), String(reason || '').slice(0, 300), !!withManaged],
     renameMember: ([id, name]) => [String(id), String(name || '').trim().slice(0, 40)],
+    saveCycle: ([o]) => [{ id: o?.id ? Number(o.id) : null, starts_on: String(o?.starts_on || '').slice(0, 10), side: o?.side === 'immortal' ? 'immortal' : 'shadows' }],
+    deleteCycle: ([id]) => [Number(id)],
     setAlias: ([id, alias]) => [String(id), String(alias || '').trim().slice(0, 40)],
     createNewsFromPath: ([o]) => [{ image_path: String(o?.image_path || ''), title: String(o?.title || ''), caption: o?.caption ? String(o.caption) : null }],
     updateNews: ([id, f]) => [Number(id), { title: String(f?.title || ''), caption: f?.caption ? String(f.caption) : null }],
@@ -1671,6 +1734,7 @@
           <select id="acting-select" class="inline">${accounts.map((a) => `<option value="${esc(a.id)}" ${a.id === actingId() ? 'selected' : ''}>${esc(displayName(a))}${a.id === state.user.id ? ' (você)' : ' 🧑‍✈️'}</option>`).join('')}</select>
         </label>` : ''}
         ${memberUI() ? '<div class="bell-wrap" id="bell-wrap"></div>' : ''}
+        ${memberUI() && can('panel_view') ? `<a class="gear${currentKey === 'panel' ? ' active' : ''}" href="#/estatisticas" title="Estatísticas" aria-label="Estatísticas"><span aria-hidden="true">📊</span></a>` : ''}
         ${isLeader() ? `<a class="gear${currentKey === 'config' ? ' active' : ''}" href="#/config" title="Configurações" aria-label="Configurações"><span aria-hidden="true">⚙️</span></a>` : ''}
         <button class="who" id="btn-profile" title="Meu perfil">${avatar(state.me)}<span class="label">${esc(displayName(state.me))}</span></button>
         <button class="btn ghost small" id="btn-logout">Sair</button>`;
@@ -5292,6 +5356,438 @@
     });
   }
 
+  // ---------- Estatísticas do clã (por ciclo do jogo; ícone 📊 ao lado do sininho) ----------
+  const PANEL = { sel: 'cur', inactiveN: 3, type: '' };
+  const SIDE = { shadows: { icon: '🌑', label: 'das Sombras' }, immortal: { icon: '👑', label: 'Imortal' } };
+  const DAY_MS = 86400000;
+  const dmy = (t) => new Date(t).toLocaleDateString('pt-BR');
+  const cycleName = (c) => `${SIDE[c.side]?.icon || ''} Ciclo ${SIDE[c.side]?.label || ''}`;
+  // Ordena e calcula o fim de cada ciclo (termina quando o próximo começa)
+  function cycleSpans(rows) {
+    const list = rows.slice().sort((a, b) => a.starts_on.localeCompare(b.starts_on));
+    return list.map((c, i) => ({ ...c, from: Date.parse(`${c.starts_on}T00:00:00`),
+      to: i < list.length - 1 ? Date.parse(`${list[i + 1].starts_on}T00:00:00`) : Infinity }));
+  }
+  const spanText = (p) => `${dmy(p.from)} → ${p.to === Infinity || p.to > Date.now() ? 'hoje' : dmy(p.to - 1)}`;
+  // Variação em relação ao período anterior
+  function deltaHtml(cur, prev, { fmt = intFmt, pct = false, invert = false } = {}) {
+    if (cur == null || prev == null) return '';
+    const d = cur - prev;
+    if (Math.abs(d) < (pct ? 0.005 : 0.5)) return '<span class="kpi-delta muted">= ciclo anterior</span>';
+    const good = invert ? d < 0 : d > 0;
+    const txt = pct ? `${d > 0 ? '+' : ''}${Math.round(d * 100)} p.p.` : `${d > 0 ? '+' : ''}${fmt(d)}`;
+    return `<span class="kpi-delta ${good ? 'c-yes' : 'c-no'}">${d > 0 ? '▲' : '▼'} ${txt} <span class="muted">vs. anterior</span></span>`;
+  }
+  const kpi = (icon, label, value, sub = '', delta = '') => `<div class="card kpi"><div class="kpi-label">${icon} ${label}</div>
+    <div class="kpi-value">${value}</div>${sub ? `<div class="kpi-sub muted small">${sub}</div>` : ''}${delta}</div>`;
+  const fmtHours = (h) => (h == null ? '—' : h < 1 ? `${Math.max(1, Math.round(h * 60))} min` : h < 48 ? `${Math.round(h)} h` : `${Math.round(h / 24)} dias`);
+
+  async function viewPanel() {
+    if (!can('panel_view')) { location.hash = '#/'; return; }
+    loading();
+    const [cyclesRaw, past, histAll, mlog, upcoming] = await Promise.all([
+      api.cycles().catch(() => []), api.history(null), api.profileHistory().catch(() => []), api.membershipLog().catch(() => []),
+      api.events(false).catch(() => []),
+    ]);
+    const results = await api.eventResults(past.map((e) => e.id)).catch(() => []);
+    const resBy = Object.fromEntries(results.map((r) => [r.event_id, r]));
+    const now = Date.now();
+    const cycles = cycleSpans(cyclesRaw);
+    const members = activeMembers();
+    const link = (m) => (m ? `<a class="member-link" href="#/membro/${encodeURIComponent(m.id)}">${esc(displayName(m))}</a>` : '—');
+    const empty = (msg) => `<div class="muted small chart-empty">${msg}</div>`;
+
+    // ----- Período escolhido (ciclo atual, outro ciclo ou todos) -----
+    let per; let prev = null;
+    if (PANEL.sel === 'all') {
+      const first = Math.min(now, ...past.map((e) => Date.parse(e.starts_at)), ...cycles.map((c) => c.from));
+      per = { label: 'Todos os ciclos', from: first, to: now };
+    } else if (cycles.length) {
+      let i = PANEL.sel === 'cur' ? cycles.length - 1 : cycles.findIndex((c) => String(c.id) === String(PANEL.sel));
+      if (i < 0) i = cycles.length - 1;
+      const c = cycles[i];
+      per = { label: cycleName(c), from: c.from, to: Math.min(c.to, now), cycle: c, cur: i === cycles.length - 1 };
+      if (i > 0) prev = { from: cycles[i - 1].from, to: cycles[i - 1].to };
+    } else {
+      per = { label: 'Últimos 45 dias', from: now - 45 * DAY_MS, to: now };
+      prev = { from: now - 90 * DAY_MS, to: now - 45 * DAY_MS };
+    }
+    const inSpan = (t, p) => t >= p.from && t < p.to;
+
+    // ----- Indicadores de um período -----
+    const histBy = {};
+    histAll.slice().sort((a, b) => Date.parse(b.changed_at) - Date.parse(a.changed_at)).forEach((h) => { (histBy[h.user_id] ||= []).push(h); });
+    function metrics(p) {
+      const evs = past.filter((e) => inSpan(Date.parse(e.starts_at), p));
+      const wars = evs.filter((e) => resBy[e.id]).sort((a, b) => Date.parse(a.starts_at) - Date.parse(b.starts_at));
+      const wins = wars.filter((e) => resBy[e.id].outcome === 'win').length;
+      const att = evs.filter((e) => e.attendance.length);
+      const rate = att.length ? att.reduce((s, e) => s + e.attendance.filter((a) => a.present).length / e.attendance.length, 0) / att.length : null;
+      const joins = mlog.filter((l) => l.to_role === 'member' && ['pending', 'former'].includes(l.from_role) && inSpan(Date.parse(l.changed_at), p));
+      const exits = mlog.filter((l) => l.to_role === 'former' && ACTIVE_ROLES.includes(l.from_role) && inSpan(Date.parse(l.changed_at), p));
+      const tEnd = Math.min(p.to, now) - 1;
+      const resAt = (t) => { const v = members.map((m) => valueAt(m, 'resonance', t, histBy[m.id] || [])).filter((x) => x != null); return v.length ? v.reduce((s, x) => s + x, 0) / v.length : null; };
+      const tks = (state.tickets || []).filter((t) => inSpan(Date.parse(t.created_at), p));
+      const firstReply = tks.map((t) => {
+        const m = (t.messages || []).find((x) => !x.internal && !x.from_author);
+        return m ? (Date.parse(m.created_at) - Date.parse(t.created_at)) / 3600000 : null;
+      }).filter((h) => h != null);
+      return { evs, wars, wins, losses: wars.length - wins, winPct: wars.length ? wins / wars.length : null, att, rate,
+        joins, exits, resStart: resAt(p.from), resEnd: resAt(tEnd), tks,
+        firstReply: firstReply.length ? firstReply.reduce((s, h) => s + h, 0) / firstReply.length : null };
+    }
+    const M = metrics(per);
+    const P = prev ? metrics(prev) : null;
+
+    // Sequência atual (todas as Guerras até o fim do período)
+    const allWars = past.filter((e) => resBy[e.id] && Date.parse(e.starts_at) < per.to).sort((a, b) => Date.parse(b.starts_at) - Date.parse(a.starts_at));
+    let streak = 0;
+    const streakKind = allWars[0] ? resBy[allWars[0].id].outcome : null;
+    for (const e of allWars) { if (resBy[e.id].outcome === streakKind) streak++; else break; }
+
+    const logAsc = mlog.slice().sort((a, b) => Date.parse(a.changed_at) - Date.parse(b.changed_at));
+    const activeAt = (t) => {
+      const last = {};
+      for (const l of logAsc) { if (Date.parse(l.changed_at) > t) break; last[l.user_id] = l.to_role; }
+      return Object.values(last).filter((r) => ACTIVE_ROLES.includes(r)).length;
+    };
+    // ----- KPIs -----
+    const activeEnd = per.to >= now - DAY_MS ? members.length : activeAt(per.to - 1);
+    const kpis = `<div class="kpi-grid">
+      ${kpi('⚔️', 'Guerras', M.wars.length ? `<span class="c-yes">${M.wins}V</span> · <span class="c-no">${M.losses}D</span>` : '—',
+        M.wars.length ? `${pctFmt(M.winPct)} de vitórias${streak >= 2 ? ` · ${streak} ${streakKind === 'win' ? 'vitórias' : 'derrotas'} seguidas` : ''}` : 'Nenhum resultado registrado',
+        deltaHtml(M.winPct, P?.winPct, { pct: true }))}
+      ${kpi('📋', 'Presença média', M.rate == null ? '—' : pctFmt(M.rate), `${M.att.length} evento(s) com presença registrada`, deltaHtml(M.rate, P?.rate, { pct: true }))}
+      ${kpi('👥', per.to >= now - DAY_MS ? 'Membros ativos' : 'Membros ativos no fim do ciclo', activeEnd, `<span class="c-yes">+${M.joins.length} entraram</span> · <span class="c-no">−${M.exits.length} saíram</span>`,
+        P ? deltaHtml(M.joins.length - M.exits.length, P.joins.length - P.exits.length) : '')}
+      ${kpi('💎', 'Ressonância média', M.resEnd == null ? '—' : intFmt(M.resEnd),
+        M.resStart != null && M.resEnd != null ? `${M.resEnd - M.resStart >= 0 ? '+' : ''}${intFmt(M.resEnd - M.resStart)} no período` : '',
+        P && M.resStart != null && P.resStart != null ? deltaHtml(M.resEnd - M.resStart, P.resEnd - P.resStart) : '')}
+      ${supportOn() ? kpi('🎫', 'Tickets', M.tks.length, `1ª resposta em ${fmtHours(M.firstReply)} (média)`, deltaHtml(M.firstReply, P?.firstReply, { fmt: (h) => fmtHours(Math.abs(h)), invert: true })) : ''}
+    </div>`;
+
+    // ----- Guerras -----
+    const warRow = (e) => { const r = resBy[e.id]; return `<a class="war-chip ${r.outcome}" href="#/evento/${e.id}" title="${esc(`${fmtShortDate(e.starts_at)} · ${r.outcome === 'win' ? 'Vitória' : 'Derrota'}${r.opponent ? ` contra ${r.opponent}` : ''}${scoreText(r) ? ` · ${scoreText(r)}` : ''}`)}">${r.outcome === 'win' ? 'V' : 'D'}</a>`; };
+    const seq = M.wars.length ? `<div class="war-seq">${M.wars.map(warRow).join('')}</div><div class="muted small">Da mais antiga para a mais recente. Passe o mouse para ver o adversário e o placar.</div>` : empty('Nenhuma Guerra com resultado registrado neste período.');
+    const cycleBars = cycles.length >= 2 ? vcols(cycles.slice(-6).map((c) => {
+      const m = metrics({ from: c.from, to: Math.min(c.to, now) });
+      return { label: `${SIDE[c.side].icon} ${fmtShortDate(new Date(c.from).toISOString())}`, title: `${cycleName(c)} (${spanText(c)}): ${m.wins} vitória(s), ${m.losses} derrota(s)`,
+        bars: [{ v: m.wins, cls: 'win' }, { v: m.losses, cls: 'loss' }] };
+    })) + '<div class="chart-legend"><span class="lg win"></span> vitórias <span class="lg loss"></span> derrotas</div>' : '';
+
+    const opp = {};
+    M.wars.forEach((e) => { const r = resBy[e.id]; const k = r.opponent || 'Não informado'; const o = (opp[k] ||= { name: k, n: 0, w: 0, us: 0, them: 0, scored: 0 });
+      o.n++; if (r.outcome === 'win') o.w++; if (r.score_us != null && r.score_them != null) { o.us += r.score_us; o.them += r.score_them; o.scored++; } });
+    const oppRows = Object.values(opp).sort((a, b) => b.n - a.n || b.w - a.w || a.name.localeCompare(b.name, 'pt-BR'));
+    const oppTable = oppRows.length ? `<table class="mini-table"><thead><tr><th>Clã</th><th>Jogos</th><th>V–D</th><th>Placar total</th></tr></thead><tbody>
+      ${oppRows.map((o) => `<tr><td>${esc(o.name)}</td><td>${o.n}</td><td><span class="c-yes">${o.w}</span>–<span class="c-no">${o.n - o.w}</span></td>
+        <td>${o.scored ? `${o.us} × ${o.them}` : '—'}</td></tr>`).join('')}</tbody></table>` : empty('Sem adversários registrados no período.');
+
+    const scored = M.wars.filter((e) => resBy[e.id].score_us != null && resBy[e.id].score_them != null);
+    const avg = (arr, f) => (arr.length ? arr.reduce((s, x) => s + f(x), 0) / arr.length : null);
+    const margin = (e) => resBy[e.id].score_us - resBy[e.id].score_them;
+    const bigWin = scored.filter((e) => margin(e) > 0).sort((a, b) => margin(b) - margin(a))[0];
+    const bigLoss = scored.filter((e) => margin(e) < 0).sort((a, b) => margin(a) - margin(b))[0];
+    const evLine = (e) => `<a href="#/evento/${e.id}">${fmtShortDate(e.starts_at)}</a> ${resBy[e.id].opponent ? `contra <b>${esc(resBy[e.id].opponent)}</b>` : ''} · ${esc(scoreText(resBy[e.id]))}`;
+    const dec = (n) => n.toFixed(1).replace('.', ',');
+    const scoreBox = scored.length ? `<div class="score-big">${dec(avg(scored, (e) => resBy[e.id].score_us))} <span class="muted">×</span> ${dec(avg(scored, (e) => resBy[e.id].score_them))}</div>
+      <div class="muted small" style="text-align:center">placar médio (nós × eles) em ${scored.length} Guerra(s)</div>
+      <ul class="plain-list">${bigWin ? `<li>🏆 Maior vitória: ${evLine(bigWin)}</li>` : ''}${bigLoss ? `<li>💀 Maior derrota: ${evLine(bigLoss)}</li>` : ''}</ul>`
+      : empty('Nenhuma Guerra com placar registrado no período.');
+
+    const presOf = (e) => e.attendance.filter((a) => a.present).length;
+    const confOf = (e) => e.rsvps.filter((r) => r.going).length;
+    const warsAtt = M.wars.filter((e) => e.attendance.length);
+    const byOut = (o) => warsAtt.filter((e) => resBy[e.id].outcome === o);
+    const wA = byOut('win'); const lA = byOut('loss');
+    const presBox = warsAtt.length ? hbars([
+      { label: 'Vitórias', labelHtml: '<span class="c-yes">Vitórias</span>', value: avg(wA, presOf) || 0, color: 'var(--yes)',
+        valHtml: wA.length ? `<b>${intFmt(avg(wA, presOf))}</b> <span class="muted">presentes · ${intFmt(avg(wA, confOf))} confirmaram</span>` : '—' },
+      { label: 'Derrotas', labelHtml: '<span class="c-no">Derrotas</span>', value: avg(lA, presOf) || 0, color: 'var(--no)',
+        valHtml: lA.length ? `<b>${intFmt(avg(lA, presOf))}</b> <span class="muted">presentes · ${intFmt(avg(lA, confOf))} confirmaram</span>` : '—' },
+    ]) + '<div class="muted small">Média de membros presentes por Guerra (só as Guerras com presença registrada).</div>'
+      : empty('Registre a presença das Guerras para comparar com o resultado.');
+
+    // ----- Engajamento no período (filtrável por tipo) -----
+    const typeOk = (e) => !PANEL.type || (PANEL.type === 'none' ? !e.type_id : e.type_id === Number(PANEL.type));
+    const evsT = M.evs.filter(typeOk);
+    const withAtt = evsT.filter((e) => e.attendance.length).sort((a, b) => Date.parse(a.starts_at) - Date.parse(b.starts_at)).slice(-14);
+    const presenceChart = withAtt.length ? vcols(withAtt.map((e) => ({ label: fmtShortDate(e.starts_at),
+      title: `${e.title} ${fmtShortDate(e.starts_at)}: ${confOf(e)} confirmaram, ${presOf(e)} estiveram presentes`,
+      bars: [{ v: confOf(e), cls: 'conf' }, { v: presOf(e), cls: 'pres' }] })))
+      + '<div class="chart-legend"><span class="lg conf"></span> confirmaram <span class="lg pres"></span> estiveram presentes</div>'
+      : empty('Nenhum evento com presença registrada no período.');
+    const freq = computeFrequency(evsT, members).filter((r) => r.total);
+    const maxTotal = Math.max(0, ...freq.map((r) => r.total));
+    const ranked = freq.filter((r) => r.total >= Math.min(3, maxTotal));
+    const byPct = (dir) => (a, b) => dir * (a.pct - b.pct) || dir * (a.present - b.present) || byName(a.m, b.m);
+    const best = ranked.slice().sort(byPct(-1)).slice(0, 8);
+    const worst = ranked.slice().sort(byPct(1)).filter((r) => !best.includes(r)).slice(0, 8);
+    const rankBars = (rows) => hbars(rows.map((r) => ({ label: displayName(r.m), labelHtml: link(r.m), value: r.pct, color: pctColor(r.pct),
+      valHtml: `${pctFmt(r.pct)} <span class="muted">${r.present}/${r.total}</span>`, title: `${displayName(r.m)}: ${r.present} de ${r.total} eventos` })), { max: 1, fmt: pctFmt });
+
+    // Respostas: últimos eventos do período e, no ciclo atual, os próximos
+    const nextEvs = per.to >= now - DAY_MS ? upcoming.filter(typeOk).slice(0, 3) : [];
+    const respEvents = [
+      ...evsT.slice().sort((a, b) => Date.parse(a.starts_at) - Date.parse(b.starts_at)).slice(-6).map((e) => ({ e, soon: false })),
+      ...nextEvs.map((e) => ({ e, soon: true })),
+    ];
+    const respChart = respEvents.length ? stackRows(respEvents.map(({ e, soon }) => {
+      const t = Date.parse(e.starts_at);
+      const elig = members.filter((m) => soon || (Date.parse(m.created_at || 0) || 0) < t);
+      const eligIds = new Set(elig.map((m) => m.id));
+      const rs = e.rsvps.filter((r) => eligIds.has(r.user_id));
+      const yes = rs.filter((r) => r.going).length;
+      return { total: elig.length, yes, no: rs.length - yes, none: elig.length - rs.length, title: `${e.title} · ${fmtShortDate(e.starts_at)}`,
+        labelHtml: `${soon ? '<span class="soon-tag">próximo</span> ' : ''}<b>${fmtShortDate(e.starts_at)}</b> <span class="muted">${esc(e.title)}</span>` };
+    })) + '<div class="chart-legend"><span class="lg yes"></span> vão <span class="lg no"></span> não vão <span class="lg none"></span> sem resposta</div>'
+      : empty('Nenhum evento no período.');
+    const nextEv = nextEvs[0];
+    const pendingNames = nextEv ? members.filter((m) => !nextEv.rsvps.some((r) => r.user_id === m.id)).sort(byName) : [];
+    const pendingBox = nextEv ? `<div class="pending-answer">
+        <b>Ainda não responderam a <a href="#/evento/${nextEv.id}">${esc(nextEv.title)} ${fmtShortDate(nextEv.starts_at)}</a> (${pendingNames.length}):</b>
+        ${pendingNames.length ? `<div class="name-chips">${pendingNames.map((m) => `<span class="name-chip">${link(m)}</span>`).join('')}</div>
+          <button class="btn small" id="pn-copy-pending">📋 Copiar lista</button>` : '<span class="c-yes"> todos responderam! 🎉</span>'}
+      </div>` : '';
+    const hasUntyped = past.some((e) => !e.type_id);
+
+    // ----- Composição (hoje) -----
+    const counts = CLASSES.map((c) => ({ c, n: members.filter((m) => m.char_class === c.key).length }))
+      .sort((a, b) => b.n - a.n || a.c.label.localeCompare(b.c.label, 'pt-BR'));
+    const noClass = members.filter((m) => !CLASS[m.char_class]).length;
+    const classChart = hbars(counts.map(({ c, n }) => ({ label: c.label, labelHtml: `${classTag(c.key)} ${esc(c.label)}`, value: n, color: c.color, title: `${c.label}: ${n} membro(s)` })));
+    const res = members.map((m) => Number(m.resonance)).filter((v) => Number.isFinite(v) && v > 0).sort((a, b) => a - b);
+    let resChart = empty('Ninguém informou a Ressonância ainda.');
+    let resSummary = '';
+    if (res.length) {
+      const lo = res[0]; const hi = res[res.length - 1];
+      const step = [100, 250, 500, 1000, 2000, 5000].find((s) => Math.floor(hi / s) - Math.floor(lo / s) + 1 <= 8) || 10000;
+      const bins = [];
+      for (let b = Math.floor(lo / step) * step; b <= hi; b += step) bins.push({ from: b, to: b + step - 1, n: res.filter((v) => v >= b && v < b + step).length });
+      resChart = vcols(bins.map((b) => ({ label: intFmt(b.from), title: `${intFmt(b.from)} a ${intFmt(b.to)}: ${b.n} membro(s)`, bars: [{ v: b.n, cls: 'pres' }] })));
+      const median = res.length % 2 ? res[(res.length - 1) / 2] : (res[res.length / 2 - 1] + res[res.length / 2]) / 2;
+      resSummary = `<div class="chart-foot">Média <b>${intFmt(res.reduce((s, v) => s + v, 0) / res.length)}</b> · Mediana <b>${intFmt(median)}</b> · Menor <b>${intFmt(lo)}</b> · Maior <b>${intFmt(hi)}</b></div>`;
+    }
+
+    // ----- Evolução da Ressonância no período -----
+    const tEndEvo = Math.min(per.to, now) - 1;
+    const evoStart = Math.max(per.from, Math.min(now, ...members.map((m) => Date.parse(m.created_at || 0) || now)));
+    const evoPts = [];
+    for (let k = 0; k <= 11; k++) {
+      const t = evoStart + ((tEndEvo - evoStart) * k) / 11;
+      const vals = members.map((m) => valueAt(m, 'resonance', t, histBy[m.id] || [])).filter((v) => v != null);
+      if (vals.length) evoPts.push({ t, label: fmtShortDate(new Date(t).toISOString()), v: vals.reduce((s, v) => s + v, 0) / vals.length, n: vals.length });
+    }
+    let evoChart = empty('Ainda não há histórico suficiente. O gráfico ganha forma conforme os membros atualizam a Ressonância.');
+    if (evoPts.length >= 2) {
+      const diff = evoPts[evoPts.length - 1].v - evoPts[0].v;
+      evoChart = lineChart(evoPts, { time: true }) + `<div class="chart-foot">Desde ${evoPts[0].label}: <b class="${diff > 0 ? 'c-yes' : diff < 0 ? 'c-no' : ''}">${diff > 0 ? '+' : ''}${intFmt(diff)}</b> na média do clã</div>`;
+    }
+    const gains = members.map((m) => {
+      const h = histBy[m.id] || [];
+      const before = valueAt(m, 'resonance', per.from, h); const after = valueAt(m, 'resonance', tEndEvo, h);
+      return { m, before, after, gain: before != null && after != null ? after - before : 0 };
+    }).filter((g) => g.gain > 0).sort((a, b) => b.gain - a.gain || byName(a.m, b.m)).slice(0, 8);
+    const gainChart = gains.length ? hbars(gains.map((g) => ({ label: displayName(g.m), labelHtml: link(g.m), value: g.gain, color: 'var(--ember)',
+      valHtml: `<b class="c-yes">+${intFmt(g.gain)}</b> <span class="muted">${intFmt(g.before)} → ${intFmt(g.after)}</span>`,
+      title: `${displayName(g.m)}: ${intFmt(g.before)} → ${intFmt(g.after)}` }))) : empty('Ninguém aumentou a Ressonância no período (ou ainda não atualizou no site).');
+
+    // ----- Saúde do clã -----
+    const span = Math.max(DAY_MS, Math.min(per.to, now) - per.from);
+    const pts = [];
+    for (let k = 0; k <= 10; k++) { const t = per.from + (span * k) / 10; const v = activeAt(t); pts.push({ t, label: fmtShortDate(new Date(t).toISOString()), v, tip: `${dmy(t)}: ${v} membros ativos` }); }
+    const healthChart = mlog.length ? lineChart(pts, { time: true, aria: 'Membros ativos ao longo do período' }) : empty('Sem histórico de entradas e saídas.');
+    const moveList = (rows, kind) => (rows.length ? `<ul class="plain-list">${rows.slice().sort((a, b) => Date.parse(b.changed_at) - Date.parse(a.changed_at)).map((l) => {
+      const m = memberById(l.user_id);
+      return `<li>${fmtShortDate(l.changed_at)} · ${link(m)}${kind === 'out' && l.reason ? ` <span class="muted small">· ${esc(l.reason)}</span>` : kind === 'in' && l.from_role === 'former' ? ' <span class="muted small">· readmitido</span>' : ''}</li>`;
+    }).join('')}</ul>` : empty(kind === 'in' ? 'Ninguém entrou no período.' : 'Ninguém saiu no período.'));
+
+    // ----- Atendimento -----
+    const openTk = (state.tickets || []).filter((t) => t.status !== 'resolved');
+    const stale = openTk.filter((t) => ticketPending(t) === 'staff' && now - Date.parse(lastActivity(t)) > 48 * 3600000)
+      .sort((a, b) => Date.parse(lastActivity(a)) - Date.parse(lastActivity(b)));
+    const resolvedN = M.tks.filter((t) => t.status === 'resolved').length;
+    const supportBox = supportOn() ? `<section class="stats-section">
+        <h3>🎫 Atendimento <span class="muted small">· ${esc(per.label)}</span></h3>
+        <div class="chart-grid">
+          <div class="card chart"><h4>Tickets no período</h4>
+            <div class="kpi-row"><div><b>${M.tks.length}</b><span class="muted small">abertos</span></div><div><b>${resolvedN}</b><span class="muted small">já resolvidos</span></div>
+              <div><b>${fmtHours(M.firstReply)}</b><span class="muted small">até a 1ª resposta (média)</span></div></div></div>
+          <div class="card chart"><h4>⏳ Parados há mais de 48 h <span class="muted small">(esperando a liderança)</span></h4>
+            ${stale.length ? `<ul class="plain-list">${stale.map((t) => `<li><a href="#/ticket/${t.id}">${esc(t.title)}</a> <span class="muted small">· sem resposta há ${fmtHours((now - Date.parse(lastActivity(t))) / 3600000)}</span></li>`).join('')}</ul>`
+              : empty('Nenhum ticket parado. 🎉')}</div>
+        </div></section>` : '';
+
+    // ----- Perfis incompletos -----
+    const lastAttrUpdate = (m) => {
+      const h = (histBy[m.id] || []).find((x) => ATTRS.some((a) => x.changes && a.key in x.changes));
+      return h ? Date.parse(h.changed_at) : Date.parse(m.created_at || 0) || 0;
+    };
+    const incomplete = members.map((m) => {
+      const miss = [];
+      if (!CLASS[m.char_class]) miss.push('sem classe');
+      const noAttr = ATTRS.filter((a) => !(Number(m[a.key]) > 0));
+      if (noAttr.length) miss.push(noAttr.length === ATTRS.length ? 'sem atributos' : `sem ${noAttr.map((a) => a.label).join(', ')}`);
+      const age = (now - lastAttrUpdate(m)) / DAY_MS;
+      if (!noAttr.length && age > 30) miss.push(`atributos sem atualizar há ${Math.floor(age)} dias`);
+      return { m, miss, age };
+    }).filter((r) => r.miss.length).sort((a, b) => b.miss.length - a.miss.length || b.age - a.age || byName(a.m, b.m));
+
+    // ----- Inativos -----
+    const N = PANEL.inactiveN;
+    const lastN = past.filter((e) => e.attendance.length).sort((a, b) => Date.parse(b.starts_at) - Date.parse(a.starts_at)).slice(0, N);
+    const oldest = lastN.length ? Date.parse(lastN[lastN.length - 1].starts_at) : 0;
+    const lastPresence = (m) => past.filter((e) => e.attendance.some((a) => a.user_id === m.id && a.present)).map((e) => Date.parse(e.starts_at)).sort((a, b) => b - a)[0];
+    const inactive = lastN.length < N ? [] : members.filter((m) => (Date.parse(m.created_at || 0) || 0) < oldest
+      && lastN.every((e) => !e.attendance.some((a) => a.user_id === m.id && a.present)
+        && !e.rsvps.some((r) => r.user_id === m.id && r.absence_id)))
+      .map((m) => ({ m, last: lastPresence(m), answered: lastN.filter((e) => e.rsvps.some((r) => r.user_id === m.id)).length }))
+      .sort((a, b) => (a.last || 0) - (b.last || 0) || byName(a.m, b.m));
+
+    // ----- Tela -----
+    const cycleOpts = cycles.slice().reverse().map((c, i) => `<option value="${i === 0 ? 'cur' : c.id}" ${(i === 0 ? PANEL.sel === 'cur' : String(PANEL.sel) === String(c.id)) ? 'selected' : ''}>${esc(`${cycleName(c)} · ${spanText(c)}${i === 0 ? ' (atual)' : ''}`)}</option>`).join('');
+    const weekN = per.cycle ? Math.floor((Math.min(per.to, now) - per.from) / (7 * DAY_MS)) + 1 : null;
+    main.innerHTML = `
+      <div class="page-head"><h1>Estatísticas do clã</h1>
+        ${can('cycles') ? '<button class="btn" id="pn-cycles">🗓 Ciclos</button>' : ''}</div>
+      <div class="card panel-period">
+        <div class="row" style="gap:10px;flex-wrap:wrap;align-items:center">
+          <label for="pn-sel" class="muted small">Período</label>
+          <select id="pn-sel">${cycleOpts}<option value="all" ${PANEL.sel === 'all' ? 'selected' : ''}>Todos os ciclos</option></select>
+        </div>
+        <div class="panel-cycle">${cycles.length ? `<b>${esc(per.label)}</b> <span class="muted">· ${per.cycle ? spanText(per.cycle) : `${dmy(per.from)} → hoje`}</span>
+          ${per.cur ? ` <span class="badge">Semana ${weekN}</span>` : ''}${prev ? '<div class="muted small">As setas comparam com o ciclo anterior.</div>' : ''}`
+          : `<span class="c-no">Nenhum ciclo cadastrado.</span> <span class="muted small">Mostrando os últimos 45 dias.${can('cycles') ? ' Cadastre o ciclo atual em 🗓 Ciclos.' : ''}</span>`}</div>
+      </div>
+      ${kpis}
+      <section class="stats-section">
+        <h3>⚔️ Guerras <span class="muted small">· ${esc(per.label)}</span></h3>
+        <div class="chart-grid">
+          <div class="card chart"><h4>Resultados</h4>${seq}</div>
+          ${cycleBars ? `<div class="card chart"><h4>Vitórias e derrotas por ciclo</h4>${cycleBars}</div>` : ''}
+          <div class="card chart"><h4>🛡️ Adversários</h4>${oppTable}</div>
+          <div class="card chart"><h4>🎯 Placar</h4>${scoreBox}</div>
+          <div class="card chart"><h4>👥 Presença × resultado</h4>${presBox}</div>
+        </div>
+      </section>
+      <section class="stats-section">
+        <h3>📈 Engajamento <span class="muted small">· ${esc(per.label)}</span>
+          <select class="inline" id="pn-type" aria-label="Tipo de evento">
+            <option value="">Todos os tipos</option>
+            ${state.types.map((t) => `<option value="${t.id}" ${PANEL.type === String(t.id) ? 'selected' : ''}>${esc(t.name)}</option>`).join('')}
+            ${hasUntyped ? `<option value="none" ${PANEL.type === 'none' ? 'selected' : ''}>Sem tipo</option>` : ''}
+          </select></h3>
+        <div class="chart-grid">
+          <div class="card chart"><h4>Presença por evento</h4>${presenceChart}</div>
+          <div class="card chart"><h4>Respostas por evento</h4>${respChart}${pendingBox}</div>
+          <div class="card chart"><h4>🏆 Mais presentes</h4>${best.length ? rankBars(best) : empty('Sem presença registrada no período.')}</div>
+          <div class="card chart"><h4>⚠️ Mais faltam</h4>${worst.length ? rankBars(worst) : empty(best.length ? 'Todos já aparecem no ranking ao lado.' : 'Sem presença registrada no período.')}</div>
+        </div>
+      </section>
+      <section class="stats-section">
+        <h3>🧙 Composição do clã <span class="muted small">· hoje · ${members.length} membros ativos</span></h3>
+        <div class="chart-grid">
+          <div class="card chart"><h4>Membros por classe</h4>${classChart}
+            ${noClass ? `<div class="chart-foot">${noClass} membro(s) ainda sem classe informada</div>` : ''}</div>
+          <div class="card chart"><h4>Distribuição de Ressonância</h4>${resChart}${resSummary}</div>
+        </div>
+      </section>
+      <section class="stats-section">
+        <h3>💪 Evolução <span class="muted small">· ${esc(per.label)}</span></h3>
+        <div class="chart-grid evo">
+          <div class="card chart wide"><h4>Ressonância média do clã</h4>${evoChart}
+            <div class="muted small">Considera os membros ativos de hoje. Antes da primeira atualização de cada um, vale o primeiro valor informado.</div></div>
+          <div class="card chart"><h4>🔥 Quem mais evoluiu no período</h4>${gainChart}</div>
+        </div>
+      </section>
+      <section class="stats-section">
+        <h3>🫀 Saúde do clã <span class="muted small">· ${esc(per.label)}</span></h3>
+        <div class="chart-grid">
+          <div class="card chart wide"><h4>Membros ativos</h4>${healthChart}</div>
+          <div class="card chart"><h4>✅ Entraram (${M.joins.length})</h4>${moveList(M.joins, 'in')}</div>
+          <div class="card chart"><h4>🚪 Saíram (${M.exits.length})</h4>${moveList(M.exits, 'out')}</div>
+        </div>
+      </section>
+      ${supportBox}
+      <section class="stats-section">
+        <h3>🔎 Atenção</h3>
+        <div class="chart-grid">
+          <div class="card chart"><h4>💤 Inativos
+              <span class="muted small">· faltaram os últimos <input type="number" id="pn-n" min="2" max="15" value="${N}" class="inline-num"> eventos com presença</span></h4>
+            ${lastN.length < N ? empty(`Ainda não há ${N} eventos com presença registrada.`) : inactive.length
+              ? `<ul class="plain-list">${inactive.map((r) => `<li>${link(r.m)} <span class="muted small">· última presença: ${r.last ? dmy(r.last) : 'nunca'}${r.answered ? ` · respondeu ${r.answered} de ${N}` : ' · não respondeu nenhum'}</span></li>`).join('')}</ul>
+                <button class="btn small" id="pn-copy-inactive">📋 Copiar lista</button>`
+              : empty('Ninguém faltou a todos esses eventos. 🎉')}
+            <div class="muted small">Não conta quem tinha ausência programada nem quem entrou depois desses eventos.</div></div>
+          <div class="card chart"><h4>📝 Perfis incompletos ou desatualizados (${incomplete.length})</h4>
+            ${incomplete.length ? `<ul class="plain-list">${incomplete.slice(0, 30).map((r) => `<li>${link(r.m)} <span class="muted small">· ${esc(r.miss.join(' · '))}</span></li>`).join('')}</ul>
+              ${incomplete.length > 30 ? `<div class="muted small">e mais ${incomplete.length - 30}…</div>` : ''}<button class="btn small" id="pn-copy-incomplete">📋 Copiar lista</button>`
+              : empty('Todos os perfis estão completos e atualizados. 🎉')}
+            <div class="muted small">Desatualizado: atributos sem nenhuma alteração há mais de 30 dias.</div></div>
+        </div>
+      </section>`;
+
+    $('#pn-sel').addEventListener('change', (e) => { PANEL.sel = e.target.value; viewPanel().catch(fail); });
+    $('#pn-n')?.addEventListener('change', (e) => { PANEL.inactiveN = Math.min(15, Math.max(2, Number(e.target.value) || 3)); viewPanel().catch(fail); });
+    $('#pn-cycles')?.addEventListener('click', () => openCyclesDialog(cycles, () => viewPanel()));
+    $('#pn-copy-inactive')?.addEventListener('click', () => copy([`**Inativos: faltaram os últimos ${N} eventos**`, ...inactive.map((r) => `• ${displayName(r.m)}`)].join('\n'), 'Lista copiada'));
+    $('#pn-copy-incomplete')?.addEventListener('click', () => copy(['**Perfis para atualizar no site**', ...incomplete.map((r) => `• ${displayName(r.m)} (${r.miss.join(', ')})`)].join('\n'), 'Lista copiada'));
+    $('#pn-type').addEventListener('change', (e) => { PANEL.type = e.target.value; viewPanel().catch(fail); });
+    $('#pn-copy-pending')?.addEventListener('click', () => {
+      copy([`**Ainda não responderam: ${nextEv.title} ${fmtShortDate(nextEv.starts_at)}**`, ...pendingNames.map((m) => `• ${displayName(m)}`)].join('\n'), 'Lista copiada');
+    });
+  }
+
+  // Segundas-feiras para o início do ciclo: da desta semana até 1 ano atrás
+  function mondays(keep) {
+    const d = new Date(); d.setHours(12, 0, 0, 0);
+    d.setDate(d.getDate() - ((d.getDay() + 6) % 7));
+    const out = [];
+    for (let i = 0; i < 53; i++, d.setDate(d.getDate() - 7)) out.push(ymdOf(d));
+    if (keep && !out.includes(keep)) out.push(keep);
+    return out;
+  }
+  const mondayLabel = (v) => new Date(`${v}T12:00:00`).toLocaleDateString('pt-BR', { weekday: 'short', day: '2-digit', month: '2-digit', year: 'numeric' }).replace('.', '');
+
+  // Cadastro dos ciclos (Sombras / Imortal): começa numa segunda e termina no domingo antes do próximo
+  function openCyclesDialog(cycles, after) {
+    const rows = cycles.slice().reverse();
+    const render = (edit) => openDialog(`<form id="cy" class="stack">
+      <h2>🗓 Ciclos</h2>
+      <p class="muted small" style="margin:0">Cadastre a segunda-feira em que cada ciclo começa e o lado do clã. O ciclo termina no domingo antes do próximo.</p>
+      <div class="cy-list">${rows.length ? rows.map((c, i) => `<div class="cy-row"><span><b>${esc(cycleName(c))}</b> <span class="muted small">· ${spanText(c)}${i === 0 ? ' (atual)' : ''}</span></span>
+        <span class="row" style="gap:6px"><button type="button" class="btn small ghost" data-cy-edit="${c.id}">Editar</button><button type="button" class="btn small ghost" data-cy-del="${c.id}">Apagar</button></span></div>`).join('')
+        : '<p class="muted small">Nenhum ciclo cadastrado ainda.</p>'}</div>
+      <h3 style="margin:6px 0 0">${edit ? 'Editar ciclo' : 'Novo ciclo'}</h3>
+      <div class="row" style="gap:10px;flex-wrap:wrap">
+        <div class="field" style="flex:1;min-width:150px"><label for="cy-date">Começou na segunda-feira</label><select id="cy-date" required>${mondays(edit?.starts_on).map((v, i) => `<option value="${v}" ${(edit ? v === edit.starts_on : i === 0) ? 'selected' : ''}>${esc(mondayLabel(v))}</option>`).join('')}</select></div>
+        <div class="field" style="flex:1;min-width:150px"><label for="cy-side">Lado</label><select id="cy-side">
+          <option value="shadows" ${edit?.side !== 'immortal' ? 'selected' : ''}>🌑 Sombras</option><option value="immortal" ${edit?.side === 'immortal' ? 'selected' : ''}>👑 Imortal</option></select></div>
+      </div>
+      <div class="row end">
+        ${edit ? '<button type="button" class="btn ghost" id="cy-new">Cancelar edição</button>' : '<button type="button" class="btn ghost" data-close>Fechar</button>'}
+        <button type="submit" class="btn primary">${edit ? 'Salvar' : 'Cadastrar ciclo'}</button>
+      </div>
+    </form>`, (d) => {
+      $('#cy-new', d)?.addEventListener('click', () => render(null));
+      d.querySelectorAll('[data-cy-edit]').forEach((b) => b.addEventListener('click', () => render(rows.find((c) => String(c.id) === b.dataset.cyEdit))));
+      d.querySelectorAll('[data-cy-del]').forEach((b) => b.addEventListener('click', async () => {
+        const c = rows.find((x) => String(x.id) === b.dataset.cyDel);
+        if (!(await confirmDialog(`Apagar o ${cycleName(c)} que começou em ${dmy(c.from)}? Os eventos e resultados não são apagados.`, 'Apagar'))) { render(edit); return; }
+        try { await api.deleteCycle(c.id); toast('Ciclo apagado'); await after(); } catch (err) { fail(err); }
+      }));
+      $('#cy', d).addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const btn = $('button[type=submit]', d); btn.disabled = true;
+        try {
+          await api.saveCycle({ id: edit?.id ?? null, starts_on: $('#cy-date', d).value, side: $('#cy-side', d).value });
+          dlg.close(); toast(edit ? 'Ciclo atualizado' : 'Ciclo cadastrado'); await after();
+        } catch (err) { fail(err); btn.disabled = false; }
+      });
+    });
+    render(null);
+  }
+
   // ---------- Utils: links úteis (todos os membros) ----------
 
   const UTIL_LINKS = [
@@ -6082,7 +6578,7 @@
     const mp = h.match(/^\/membro\/([\w%-]+)$/); // perfil de um membro (oficiais e líder)
     const rc = RECRUIT_ON ? h.match(/^\/recrutamento\/(\d+)$/) : null;
     const tk = TICKETS_ON ? h.match(/^\/ticket\/(\d+)$/) : null;
-    const key = h === '/passados' ? 'past' : h === '/frequencia' ? 'freq' : h === '/news' ? 'news' : h === '/utils' ? 'utils'
+    const key = h === '/passados' ? 'past' : h === '/frequencia' ? 'freq' : h === '/estatisticas' ? 'panel' : h === '/news' ? 'news' : h === '/utils' ? 'utils'
       : h === '/config' ? 'config' : h === '/solicitacoes' ? 'requests'
       : RECRUIT_ON && h === '/recrutamentos' ? 'recruits' : rc ? 'recruits'
       : TICKETS_ON && h === '/tickets' ? 'tickets' : TICKETS_ON && h === '/atendimento' ? 'support' : tk ? 'ticket'
@@ -6117,6 +6613,7 @@
       else if (key === 'profile') await viewMyPanel();
       else if (key === 'members') await viewMembers();
       else if (key === 'freq') await viewFrequency();
+      else if (key === 'panel') await viewPanel();
       else if (key === 'teams') await viewTeams(Number(tm[1]));
       else if (key === 'event') await viewEvent(Number(ev[1]));
       else await viewEvents(false);
