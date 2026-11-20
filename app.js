@@ -4465,13 +4465,14 @@
       const top = pts.reduce((b, p, i) => (p.v > b.p.v ? { p, i } : b), { p: pts[0], i: 0 });
       const topWhen = top.i === 0 && pts[0].tip.includes('valor inicial')
         ? `antes de ${new Date(pts[1].t).toLocaleDateString('pt-BR')}` : `em ${new Date(top.p.t).toLocaleDateString('pt-BR')}`;
-      const peak = top.p.v > cur ? `<br><span class="evo-peak">🏔️ Maior já registrado: <b>${fmtNum(top.p.v)}</b> ${topWhen} <span class="muted">(${fmtNum(top.p.v - cur)} acima do atual)</span></span>` : '';
+      // Ponto azul na data atual com o recorde (a dica aparece ao passar o mouse)
+      const marks = top.p.v > cur ? [{ t: pts[pts.length - 1].t, v: top.p.v, cls: 'peak', tip: `Maior valor já registrado de ${attr.label}: ${fmtNum(top.p.v)} (${topWhen}) · ${fmtNum(top.p.v - cur)} acima do atual` }] : [];
       body.innerHTML = `<div class="evo-sum">
           <span class="evo-gain ${cls}">${sign}${fmtNum(Math.abs(diff))}</span>
           <span class="small">de ${esc(attr.label)} desde ${since}${pct != null && diff ? ` <b class="${cls}">(${sign}${Math.abs(pct).toLocaleString('pt-BR', { maximumFractionDigits: 1 })}%)</b>` : ''}<br>
-          <span class="muted">Agora: <b>${fmtNum(cur)}</b>${last ? ` · última atualização em ${new Date(last).toLocaleDateString('pt-BR')}` : ''}</span>${peak}</span>
+          <span class="muted">Agora: <b>${fmtNum(cur)}</b>${last ? ` · última atualização em ${new Date(last).toLocaleDateString('pt-BR')}` : ''}</span></span>
         </div>
-        ${lineChart(pts, { time: true, aria: `${attr.label} ao longo do tempo` })}`;
+        ${lineChart(pts, { time: true, marks, aria: `${attr.label} ao longo do tempo` })}`;
     };
     document.querySelectorAll('.evo-tab').forEach((b) => b.addEventListener('click', () => show(b.dataset.evo)));
     show('resonance');
@@ -5031,6 +5032,7 @@
       <path d="${area}" fill="url(#g-area)"/>
       <path class="line" d="${line}"/>
       ${points.map((p, i) => (p.dot === false ? '' : `<circle class="pt" cx="${x(i).toFixed(1)}" cy="${y(p.v).toFixed(1)}" r="4"><title>${esc(p.tip || `${p.label}: ${intFmt(p.v)} (${p.n} membros)`)}</title></circle>`)).join('')}
+      ${(opts.marks || []).map((m) => `<circle class="pt mark ${esc(m.cls || '')}" cx="${(opts.time ? L + ((m.t - t0) * (W - L - R)) / tSpan : x(last)).toFixed(1)}" cy="${y(m.v).toFixed(1)}" r="5.5"><title>${esc(m.tip)}</title></circle>`).join('')}
       ${points.map((p, i) => (labelAt(i)
         ? `<text class="axis" x="${x(i).toFixed(1)}" y="${H - 8}" text-anchor="${opts.time && i === last ? 'end' : opts.time && i === 0 ? 'start' : 'middle'}">${esc(p.label)}</text>` : '')).join('')}
     </svg>`;

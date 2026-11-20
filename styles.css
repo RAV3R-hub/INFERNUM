@@ -1026,7 +1026,7 @@ body.has-fab main { padding-bottom: 90px; }
 
 /* Resposta do ticket: caixa maior e que cresce com o texto */
 .tk-compose textarea { min-height: 180px; max-height: 60vh; line-height: 1.5; }
-.evo-peak { color: var(--gold); }
+
 
 /* Sair do clã */
 .leave-card { margin-top: 12px; }
@@ -1047,3 +1047,5 @@ body.has-fab main { padding-bottom: 90px; }
 .help-fab-badge[hidden] { display: none; }
 @keyframes fab-pulse { 0%, 100% { transform: scale(1); } 50% { transform: scale(1.15); } }
 @media (prefers-reduced-motion: reduce) { .help-fab-badge { animation: none; } }
+.line-chart .pt.mark.peak { fill: #3b82f6; stroke: #bfdbfe; stroke-width: 2; cursor: help; }
+.line-chart .pt.mark.peak:hover { fill: #60a5fa; }
