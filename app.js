@@ -265,6 +265,7 @@
       async setRole(userId, role) { ok(await sb.rpc('set_member_role', { target: userId, new_role: role })); },
       async removeMember(userId, reason, withManaged) { ok(await sb.rpc('remove_member', { target: userId, reason: reason || '', with_managed: !!withManaged })); },
       async renameMember(userId, name) { ok(await sb.rpc('set_member_name', { p_user: userId, p_name: name })); },
+      async setAlias(userId, alias) { ok(await sb.rpc('set_member_alias', { p_user: userId, p_alias: alias })); },
       async requestRejoin() { ok(await sb.rpc('request_rejoin')); },
       // ----- Malah News (imagens no bucket privado "news") -----
       async news() {
@@ -412,6 +413,8 @@
           created_at: i === NICKS.length - 1 ? day(-4, 12) : longAgo, ...randomBuild(),
         })),
         { id: 'p1', discord_name: 'novato123', game_name: null, role: 'pending', created_at: day(-1, 12) },
+        // Nick difícil de digitar, com codinome dado pela liderança (só para as buscas)
+        { id: 'c1', discord_name: 'xx77', game_name: '藍月ღ✧', alias: 'Lua Azul', role: 'member', created_at: longAgo, ...randomBuild() },
         { id: 'f1', discord_name: 'desertor_br', game_name: 'Desertor', role: 'former', created_at: longAgo, ...randomBuild() },
         // Conta sem login, pilotada pelo usuário da demonstração
         { id: 'm1', discord_name: '', game_name: 'Ceifador', role: 'member', managed: true, created_at: day(-30, 20), ...randomBuild() },
@@ -753,7 +756,7 @@
         const s = String(q || '').trim().toLowerCase();
         if (!isMember() || s.length < 3) return [];
         return db.profiles.filter((p) => ['member', 'officer', 'leader'].includes(p.role) && p.id !== state.user.id
-          && displayName(p).toLowerCase().includes(s))
+          && (norm(displayName(p)).includes(norm(s)) || norm(p.alias).includes(norm(s))))
           .sort(byName).slice(0, 8).map((p) => ({ id: p.id, game_name: displayName(p), char_class: p.char_class }));
       },
       async myPhone() { return db.contacts.find((c) => c.user_id === state.user.id)?.phone ?? ''; },
@@ -1014,6 +1017,18 @@
         if ((p.game_name || null) !== v) db.history.push({ id: db.history.length + 1, user_id: p.id, changed_by: state.user.id, changed_at: new Date().toISOString(), changes: { game_name: [p.game_name || null, v] } });
         p.game_name = v;
       },
+      // Codinome: nome simplificado, só para as buscas (oficiais e líder)
+      async setAlias(userId, alias) {
+        const p = profile(userId);
+        const me = profile(state.user.id).role;
+        const v = String(alias || '').trim() || null;
+        if (!p) throw new Error('Membro não encontrado');
+        if (v && v.length > 40) throw new Error('O codinome pode ter no máximo 40 caracteres');
+        if (me !== 'leader' && me !== 'officer') throw new Error('Só oficiais e o líder podem editar o codinome');
+        if (me === 'officer' && userId !== state.user.id && !['pending', 'member', 'former'].includes(p.role)) throw new Error('Só o líder pode editar o codinome de oficiais e do líder');
+        if ((p.alias || null) !== v) db.history.push({ id: db.history.length + 1, user_id: p.id, changed_by: state.user.id, changed_at: new Date().toISOString(), changes: { alias: [p.alias || null, v] } });
+        p.alias = v;
+      },
       async removeMember(userId, reason, withManaged) {
         const p = profile(userId);
         const me = profile(state.user.id).role;
@@ -1254,6 +1269,7 @@
       { key: 'member_remove', label: 'Remover ou recusar membros', approval: true },
       { key: 'leave_approve', label: 'Aprovar saída do clã', desc: 'Pedidos de membros que querem sair do clã (o de oficiais fica com o líder)', approval: true },
       { key: 'member_rename', label: 'Editar o nick dos membros', desc: 'Trocar o nome do personagem de membros e de quem aguarda aprovação', approval: true },
+      { key: 'member_alias', label: 'Editar o codinome dos membros', desc: 'Nome simplificado que não aparece no site e serve só para achar o membro nas buscas', approval: true },
       { key: 'pilots', label: 'Gerenciar pilotos de contas', desc: 'Aprovar pedidos de piloto e adicionar pilotos' },
       { key: 'notes', label: 'Anotações internas', desc: 'Ver e escrever anotações sobre os membros' },
       { key: 'view_phone', label: 'Ver telefones' },
@@ -1329,6 +1345,8 @@
     setRole: (raw, id, role) => (role === 'member' && memberById(id)?.role === 'pending' ? ['member_approve', `Aprovar ${nameOf(id)} como membro do clã`] : null),
     removeMember: (raw, id, reason) => ['member_remove', `${memberById(id)?.role === 'pending' ? 'Recusar a entrada de' : 'Remover do clã'} ${nameOf(id)}${reason ? ` · motivo: “${reason}”` : ''}`],
     renameMember: (raw, id, name) => (id === state.user.id ? null : ['member_rename', `Trocar o nick de ${nameOf(id)} para “${String(name || '').trim()}”`]),
+    setAlias: (raw, id, alias) => (id === state.user.id ? null : ['member_alias', String(alias || '').trim()
+      ? `Definir o codinome de ${nameOf(id)} como “${String(alias).trim()}”` : `Apagar o codinome de ${nameOf(id)}`]),
     addNote: () => ['notes'],
     addPilot: () => ['pilots'],
     decidePilotAccess: (raw, acc) => (acc === state.user.id ? null : ['pilots']),
@@ -1370,6 +1388,7 @@
     setRole: ([id]) => [String(id), 'member'],
     removeMember: ([id, reason, withManaged]) => [String(id), String(reason || '').slice(0, 300), !!withManaged],
     renameMember: ([id, name]) => [String(id), String(name || '').trim().slice(0, 40)],
+    setAlias: ([id, alias]) => [String(id), String(alias || '').trim().slice(0, 40)],
     createNewsFromPath: ([o]) => [{ image_path: String(o?.image_path || ''), title: String(o?.title || ''), caption: o?.caption ? String(o.caption) : null }],
     updateNews: ([id, f]) => [Number(id), { title: String(f?.title || ''), caption: f?.caption ? String(f.caption) : null }],
     deleteNews: ([p]) => [{ id: Number(p?.id), image_path: String(p?.image_path || ''), title: String(p?.title || '') }],
@@ -2659,7 +2678,7 @@
           <button type="button" class="btn small ghost" id="att-none">Desmarcar todos</button>
         </div>
         <div class="attend-list">
-          ${members.map((m) => `<label class="attend-row" data-name="${esc(displayName(m).toLowerCase())} ${esc((m.discord_name || '').toLowerCase())}">
+          ${members.map((m) => `<label class="attend-row" data-name="${esc(memberSearchText(m))}">
             <input type="checkbox" value="${esc(m.id)}" ${initial(m) ? 'checked' : ''}>
             ${avatar(m)}<span class="name">${esc(displayName(m))}</span>${tag(m)}</label>`).join('')}
         </div>
@@ -2676,7 +2695,7 @@
       $('#att-going', d).addEventListener('click', () => { boxes.forEach((b) => { b.checked = rsvp[b.value] === true; }); updateCount(); });
       $('#att-none', d).addEventListener('click', () => { boxes.forEach((b) => { b.checked = false; }); updateCount(); });
       $('#att-search', d).addEventListener('input', (e) => {
-        const q = e.target.value.trim().toLowerCase();
+        const q = norm(e.target.value);
         d.querySelectorAll('.attend-row').forEach((r) => { r.hidden = q && !r.dataset.name.includes(q); });
       });
       $('#att-form', d).addEventListener('submit', async (e) => {
@@ -3269,7 +3288,7 @@
   // ---------- Histórico de alterações ----------
 
   const FIELD_LABEL = {
-    game_name: 'Nome do personagem', discord_name: 'Nome no Discord', char_class: 'Classe',
+    game_name: 'Nome do personagem', discord_name: 'Nome no Discord', char_class: 'Classe', alias: 'Codinome',
     ...Object.fromEntries(ATTRS.map((a) => [a.key, a.label])),
   };
   const isAttr = (f) => ATTRS.some((a) => a.key === f);
@@ -3281,8 +3300,11 @@
   }
 
   function histItemsHtml(entries) {
+    // O codinome não aparece para o membro comum
+    const fields = Object.keys(FIELD_LABEL).filter((f) => f !== 'alias' || isOfficer());
     return entries.slice().sort((a, b) => Date.parse(b.changed_at) - Date.parse(a.changed_at)).map((h) => {
-      const lines = Object.keys(FIELD_LABEL).filter((f) => h.changes?.[f]).map((f) => {
+      if (!fields.some((f) => h.changes?.[f])) return '';
+      const lines = fields.filter((f) => h.changes?.[f]).map((f) => {
         const [o, n] = h.changes[f];
         const delta = isAttr(f) && o !== null && n !== null ? Number(n) - Number(o) : null;
         const deltaTxt = delta ? ` <span class="${delta > 0 ? 'c-yes' : 'c-no'} small">(${delta > 0 ? '+' : ''}${fmtNum(delta)})</span>` : '';
@@ -3325,6 +3347,44 @@
           await api.renameMember(m.id, name);
           dlg.close();
           toast(`Nick alterado para “${name}”`);
+          await after?.();
+        } catch (err) { fail(err); btn.disabled = false; }
+      });
+    });
+  }
+
+  // ---------- Codinome (oficiais e líder) ----------
+  // Nome simplificado só para as buscas. Oficial: o próprio e o de membros, de quem aguarda aprovação e ex-membros.
+  const canAlias = (m) => !!m && isOfficer()
+    && (isLeader() || (can('member_alias') && (m.id === state.user.id || ['pending', 'member', 'former'].includes(m.role))));
+  // Texto usado nas buscas de membros (sem acentos e sem maiúsculas)
+  const memberSearchText = (m, extra = []) => norm([displayName(m), m.discord_name, m.alias, ...extra].filter(Boolean).join(' '));
+  function openAliasDialog(m, after) {
+    openDialog(`<form id="al" class="stack">
+      <h2>🏷️ Codinome</h2>
+      <p class="muted small" style="margin:0">Nome simplificado para achar <b>${esc(displayName(m))}</b> nas buscas, por exemplo quando o nick tem símbolos ou letras chinesas.
+        Não aparece no site. A troca fica no histórico do membro, com o seu nome.</p>
+      <div class="field">
+        <label for="al-name">Codinome</label>
+        <input id="al-name" maxlength="40" value="${esc(m.alias || '')}" placeholder="Ex.: Lua Azul" autocomplete="off">
+      </div>
+      <div class="row end">
+        <button type="button" class="btn ghost" data-close>Cancelar</button>
+        <button type="submit" class="btn primary">Salvar</button>
+      </div>
+    </form>`, (d) => {
+      const input = $('#al-name', d);
+      input.focus(); input.select();
+      $('#al', d).addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const v = input.value.trim();
+        if (v === (m.alias || '')) { dlg.close(); return; }
+        const btn = $('button[type=submit]', d);
+        btn.disabled = true;
+        try {
+          await api.setAlias(m.id, v);
+          dlg.close();
+          toast(v ? `Codinome salvo: “${v}”` : 'Codinome apagado');
           await after?.();
         } catch (err) { fail(err); btn.disabled = false; }
       });
@@ -4367,8 +4427,8 @@
             <div class="muted small">${me.game_name ? `${esc(me.discord_name)} · ` : ''}${ROLE_LABEL[me.role]}${me.created_at ? ` · no clã desde ${new Date(me.created_at).toLocaleDateString('pt-BR')}` : ''}${phone ? ` · <a href="tel:${esc(phone.replace(/[^\d+]/g, ''))}">📞 ${esc(phone)}</a>` : ''}</div>
             ${me.char_class ? `<div class="member-build">${classTag(me.char_class)} <span>${esc(CLASS[me.char_class].label)}</span><span class="chip-stats">${statsLine(me)}</span></div>` : ''}
           </div>
-          ${self ? `<div class="row me-actions"><button class="btn small" id="btn-photo-pf">📷 ${me.custom_avatar_url ? 'Trocar foto' : 'Enviar foto'}</button><button class="btn small" id="btn-edit-pf">✎ Editar perfil</button></div>`
-            : canRename(me) ? '<button class="btn small" id="btn-rename">✎ Editar nick</button>' : ''}
+          ${self ? `<div class="row me-actions"><button class="btn small" id="btn-photo-pf">📷 ${me.custom_avatar_url ? 'Trocar foto' : 'Enviar foto'}</button><button class="btn small" id="btn-edit-pf">✎ Editar perfil</button>${canAlias(me) ? '<button class="btn small" id="btn-alias">🏷️ Codinome</button>' : ''}</div>`
+            : canRename(me) || canAlias(me) ? `<div class="row me-actions">${canRename(me) ? '<button class="btn small" id="btn-rename">✎ Editar nick</button>' : ''}${canAlias(me) ? '<button class="btn small" id="btn-alias">🏷️ Codinome</button>' : ''}</div>` : ''}
         </div>
       </div>
 
@@ -4425,6 +4485,7 @@
       });
     });
     $('#btn-rename')?.addEventListener('click', () => openRenameDialog(me, () => viewMyPanel(userId)));
+    $('#btn-alias')?.addEventListener('click', () => openAliasDialog(me, () => viewMyPanel(userId)));
     $('#btn-pr-fill')?.addEventListener('click', openProfile);
     $('#btn-pr-info')?.addEventListener('click', () => openPowerInfo(me));
     bindEvo(me, myChanges, self);
@@ -4868,13 +4929,13 @@
   // Seletor de membros com busca (usado nos pedidos de piloto)
   function memberPickerHtml(list) {
     return `<input type="search" id="pk-search" placeholder="Buscar pelo nome…">
-      <div class="picker">${list.map((m) => `<label class="pick-row" data-name="${esc(`${displayName(m)} ${m.discord_name || ''}`.toLowerCase())}">
+      <div class="picker">${list.map((m) => `<label class="pick-row" data-name="${esc(memberSearchText(m))}">
         <input type="radio" name="pk" value="${esc(m.id)}" required> ${avatar(m)}<span>${esc(displayName(m))}</span>${m.char_class ? classTag(m.char_class) : ''}
       </label>`).join('') || '<p class="muted small">Nenhum membro disponível.</p>'}</div>`;
   }
   function bindPicker(d) {
     $('#pk-search', d)?.addEventListener('input', (e) => {
-      const q = e.target.value.trim().toLowerCase();
+      const q = norm(e.target.value);
       d.querySelectorAll('.pick-row').forEach((r) => { r.hidden = !!q && !r.dataset.name.includes(q); });
     });
   }
@@ -5446,7 +5507,7 @@
       if (!ph) return '';
       return `<a class="phone" href="tel:${esc(ph.replace(/[^\d+]/g, ''))}">📞 ${esc(ph)}</a>`;
     };
-    const searchText = (m) => [displayName(m), m.discord_name, ...oldNames(m.id)].join(' ').toLowerCase();
+    const searchText = (m) => memberSearchText(m, oldNames(m.id));
     const formerly = (m) => { const n = [...new Set(oldNames(m.id))].filter((x) => x !== displayName(m) && x !== m.discord_name); return n.length ? `<span class="formerly">antes: ${esc(n.join(', '))}</span>` : ''; };
     const histBtn = (m) => (histBy[m.id]?.length
       ? `<button class="btn small ghost" data-history="${esc(m.id)}" title="Ver histórico de alterações">🕘 ${histBy[m.id].length}</button>` : '');
@@ -5454,7 +5515,7 @@
       <div class="name"><a class="member-link" href="#/membro/${encodeURIComponent(m.id)}">${esc(displayName(m))}</a>${medalsHtml(m.id)} ${absTag(m)} ${noteBadge(m)} ${pilotLabel(m)} ${formerly(m)}
         <small>${m.managed ? 'conta sem login' : (m.game_name ? esc(m.discord_name) : '')} ${phoneLink(m)}</small>
         ${m.char_class ? `<div class="member-build">${classTag(m.char_class)} <span>${esc(CLASS[m.char_class].label)}</span><span class="chip-stats">${statsLine(m)}</span></div>` : '<div class="member-build muted small">Classe e atributos não informados</div>'}
-      </div>${canRename(m) ? `<button class="btn small ghost" data-rename="${esc(m.id)}" title="Editar o nick de ${esc(displayName(m))}">✎ Nick</button>` : ''}${histBtn(m)}${ctrl}</div>`;
+      </div>${canRename(m) ? `<button class="btn small ghost" data-rename="${esc(m.id)}" title="Editar o nick de ${esc(displayName(m))}">✎ Nick</button>` : ''}${canAlias(m) ? `<button class="btn small ghost" data-alias="${esc(m.id)}" title="${m.alias ? `Codinome: ${esc(m.alias)}` : `Dar um codinome para ${esc(displayName(m))}`}">🏷️ Codinome</button>` : ''}${histBtn(m)}${ctrl}</div>`;
 
     main.innerHTML = `
       <div class="page-head"><h1>Membros</h1><span class="muted">${active.length} ativos</span>
@@ -5499,7 +5560,7 @@
       try { await api.setRole(id, role); toast(msg); await viewMembers(); } catch (e) { fail(e); await viewMembers(); }
     };
     const applySearch = () => {
-      const q = M.q.trim().toLowerCase();
+      const q = norm(M.q);
       main.querySelectorAll('.member[data-search]').forEach((r) => { r.hidden = !!q && !r.dataset.search.includes(q); });
       // Se a busca encontrar algum ex-membro, abre a lista deles
       const fb = main.querySelector('.former-box');
@@ -5526,6 +5587,11 @@
     main.querySelectorAll('[data-rename]').forEach((b) => b.addEventListener('click', () => {
       const m = [...pending, ...active, ...former].find((x) => x.id === b.dataset.rename);
       if (m) openRenameDialog(m, () => viewMembers());
+    }));
+    main.querySelectorAll('[data-alias]').forEach((b) => b.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const m = [...pending, ...active, ...former].find((x) => x.id === b.dataset.alias);
+      if (m) openAliasDialog(m, () => viewMembers());
     }));
     $('#btn-csv')?.addEventListener('click', async (e) => {
       e.target.disabled = true;
