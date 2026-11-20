@@ -5802,7 +5802,8 @@
   // ---------- Utils: links úteis (todos os membros) ----------
 
   const UTIL_LINKS = [
-    { icon: '🛡️', title: 'Discord da Aliança', desc: 'Servidor da nossa aliança no Discord', url: 'https://discord.gg/YncQxQ4bzB' },
+    { icon: '💬', title: 'Discord do Clã', desc: 'Servidor do nosso clã no Discord', url: 'https://discord.gg/r4T6hew5' },
+    { icon: '🎧', title: 'Discord da Aliança', desc: 'Servidor da nossa aliança no Discord', url: 'https://discord.gg/YncQxQ4bzB' },
     { icon: '⚔️', title: 'Builds', desc: 'Builds das classes, com itens e gemas recomendados', url: 'https://diablo.tv/builds' },
     { icon: '💎', title: 'Gemas', desc: 'Lista das gemas lendárias e seus efeitos', url: 'https://diablo.tv/legendary-gems' },
     { icon: '🏆', title: 'Rank PvP Mundial', desc: 'Ranking mundial dos jogadores', url: 'https://diablo.tv/leaderboards' },
