@@ -585,6 +585,7 @@
       { id: 801, title: 'Botão de confirmar presença travou', category: 'site', anonymous: true, author_id: 'u0', status: 'progress', assigned_to: 'u1', created_at: day(-3, 22) },
       { id: 802, title: 'Comportamento na última Guerra', category: 'report', anonymous: true, author_id: 'u9', status: 'open', assigned_to: null, created_at: day(-1, 23) },
       { id: 803, title: 'Como funciona o Rito do Exílio?', category: 'question', anonymous: false, author_id: 'u6', status: 'resolved', assigned_to: 'u0', created_at: day(-9, 19) },
+      { id: 804, title: 'Troca de horário da Vigília', category: 'question', anonymous: false, author_id: 'u0', status: 'resolved', assigned_to: 'u1', created_at: day(-2, 19) },
     ];
     db.tmsgs = [
       { id: 1, ticket_id: 800, author_id: 'u4', body: 'Que tal um treino PvP toda quarta às 21h? Ajudaria muito o pessoal novo.', internal: false, images: [], created_at: day(-1, 21) },
@@ -595,12 +596,15 @@
       { id: 6, ticket_id: 803, author_id: 'u6', body: 'Sou novo no clã. Como funciona o Rito do Exílio?', internal: false, images: [], created_at: day(-9, 19) },
       { id: 7, ticket_id: 803, author_id: 'u0', body: 'Bem-vindo! É a disputa pelo trono entre os clãs vencedores. Confirme presença no evento que montamos os times.', internal: false, images: [], created_at: day(-9, 21) },
       { id: 8, ticket_id: 803, author_id: 'u6', body: 'Entendi, valeu!', internal: false, images: [], created_at: day(-8, 12) },
+      { id: 9, ticket_id: 804, author_id: 'u0', body: 'Dá para passar a Vigília para as 21h no domingo?', internal: false, images: [], created_at: day(-2, 19) },
+      { id: 10, ticket_id: 804, author_id: 'u1', body: 'Feito! A Vigília de domingo agora começa às 21h.', internal: false, images: [], created_at: day(-1, 9) },
     ];
     // Histórico de status (quem encerrou, reabriu ou pôs em atendimento)
     db.tlog = [
       { ticket_id: 801, at: day(-2, 10), actor: 'u1', by_author: false, from_status: 'open', to_status: 'progress' },
       { ticket_id: 803, at: day(-9, 21), actor: 'u0', by_author: false, from_status: 'open', to_status: 'progress' },
       { ticket_id: 803, at: day(-8, 12, 2), actor: 'u6', by_author: true, from_status: 'progress', to_status: 'resolved' },
+      { ticket_id: 804, at: day(-1, 9, 1), actor: 'u1', by_author: false, from_status: 'open', to_status: 'resolved' },
     ];
     const tlogStatus = (t, to) => {
       if (t.status === to) return;
@@ -2145,7 +2149,7 @@
       <p class="muted small" style="margin:0 0 12px"><b>${esc(ev.title)}</b> · ${esc(fmtDay(ev.starts_at))} às ${fmtTime(ev.starts_at)}</p>
       <div class="stack cal-opts">
         <a class="btn" href="${esc(googleCalUrl(ev))}" target="_blank" rel="noopener">Google Agenda</a>
-        <button class="btn" type="button" id="cal-ics">Celular / Outlook <span class="muted small">(arquivo .ics, com aviso 30 min antes)</span></button>
+        <button class="btn" type="button" id="cal-ics">Celular / Outlook</button>
       </div>
       <div class="row end" style="margin-top:12px"><button class="btn ghost" data-close>Fechar</button></div>`, (d) => {
       $('#cal-ics', d).addEventListener('click', () => {
@@ -3817,8 +3821,20 @@
   const markTicketSeen = (id) => { try { localStorage.setItem(ticketSeenKey(id), String(Date.now())); } catch { /* ignora */ } };
   const lastPublic = (t) => [...(t.messages || [])].reverse().find((m) => !m.internal);
   const lastActivity = (t) => t.messages?.[t.messages.length - 1]?.created_at || t.created_at;
-  // Meu ticket com resposta nova da liderança que eu ainda não abri
-  const ticketHasNews = (t) => { if (!t.mine) return false; const m = lastPublic(t); return !!m && !m.from_author && Date.parse(m.created_at) > ticketSeen(t.id); };
+  // Meu ticket com resposta nova da liderança (ou encerrado por ela) que eu ainda não abri
+  const replyNews = (t) => { const m = lastPublic(t); return m && !m.from_author && Date.parse(m.created_at) > ticketSeen(t.id) ? m.created_at : null; };
+  const closedNews = (t) => {
+    if (t.status !== 'resolved') return null;
+    const l = [...(t.log || [])].reverse().find((x) => x.to_status === 'resolved');
+    return l && !l.by_author && Date.parse(l.at) > ticketSeen(t.id) ? l.at : null;
+  };
+  // Momento da novidade mais recente (resposta ou encerramento), ou null
+  const ticketNewsAt = (t) => {
+    if (!t.mine) return null;
+    const a = replyNews(t), b = closedNews(t);
+    return a && b ? (Date.parse(a) > Date.parse(b) ? a : b) : a || b;
+  };
+  const ticketHasNews = (t) => !!ticketNewsAt(t);
   // Pendência pela última mensagem pública: 'staff' = pendente atendimento; 'author' = pendente autor
   const ticketPending = (t) => (t.status === 'resolved' ? null : lastPublic(t)?.from_author ? 'staff' : 'author');
   // Ticket de outra pessoa esperando a liderança
@@ -3847,14 +3863,42 @@
     let done = {};
     try { done = JSON.parse(localStorage.getItem(tkToastKey()) || '{}') || {}; } catch { done = {}; }
     const here = parseRoute().tk;
-    const fresh = (state.tickets || []).filter((t) => ticketHasNews(t) && !(here && Number(here[1]) === t.id)
-      && done[t.id] !== lastPublic(t)?.created_at);
+    const news = (state.tickets || []).filter((t) => ticketHasNews(t) && !(here && Number(here[1]) === t.id))
+      .sort((a, b) => Date.parse(ticketNewsAt(b)) - Date.parse(ticketNewsAt(a)));
+    // Ao entrar no site: aviso na tela com atalho direto para o ticket
+    if (loginNoticeFor !== state.user.id) {
+      loginNoticeFor = state.user.id;
+      if (news.length) {
+        news.forEach((t) => { done[t.id] = ticketNewsAt(t); });
+        try { localStorage.setItem(tkToastKey(), JSON.stringify(done)); } catch { /* ignora */ }
+        return openTicketNotice(news);
+      }
+    }
+    const fresh = news.filter((t) => done[t.id] !== ticketNewsAt(t));
     if (!fresh.length) return;
-    fresh.forEach((t) => { done[t.id] = lastPublic(t).created_at; });
+    fresh.forEach((t) => { done[t.id] = ticketNewsAt(t); });
     try { localStorage.setItem(tkToastKey(), JSON.stringify(done)); } catch { /* ignora */ }
     toast(fresh.length === 1
-      ? `💬 A staff respondeu seu ticket “${fresh[0].title}”. Toque no 💬 para ver.`
+      ? `💬 ${closedNews(fresh[0]) ? 'A staff encerrou' : 'A staff respondeu'} seu ticket “${fresh[0].title}”. Toque no 💬 para ver.`
       : `💬 A staff respondeu ${fresh.length} tickets seus. Toque no 💬 para ver.`);
+  }
+  let loginNoticeFor = null;
+  // O que aconteceu no ticket, para o aviso de entrada
+  const newsLabel = (t) => (closedNews(t) && ticketNewsAt(t) === closedNews(t) ? 'foi resolvido pela staff' : 'foi respondido pela staff');
+  function openTicketNotice(list) {
+    const go = (id) => { dlg.close(); location.hash = `#/ticket/${id}`; };
+    const one = list.length === 1 ? list[0] : null;
+    const body = one
+      ? `<p>Seu ticket <b>“${esc(one.title)}”</b> ${newsLabel(one)}.</p>
+         <div class="row end"><button class="btn ghost" data-close>Depois</button><button class="btn primary" data-go="${one.id}">Ver o ticket</button></div>`
+      : `<p>Você tem novidades em ${list.length} tickets:</p>
+         <div class="tk-notice-list">${list.map((t) => `
+           <div class="tk-notice-row"><div><b>“${esc(t.title)}”</b><div class="muted small">${newsLabel(t)}</div></div>
+             <button class="btn small primary" data-go="${t.id}">Ver</button></div>`).join('')}</div>
+         <div class="row end"><button class="btn ghost" data-close>Depois</button></div>`;
+    openDialog(`<h2>💬 Retorno da staff</h2>${body}`, (d) => {
+      d.querySelectorAll('[data-go]').forEach((b) => b.addEventListener('click', () => go(Number(b.dataset.go))));
+    });
   }
   // Enquanto o site está aberto, confere novas respostas a cada minuto (e ao voltar para a aba)
   let ticketPollBusy = false;
