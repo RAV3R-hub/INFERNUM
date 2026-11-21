@@ -222,6 +222,26 @@
       },
       async saveCycle(o) { ok(await sb.rpc('save_cycle', { p_id: o.id ?? null, p_starts_on: o.starts_on, p_side: o.side })); },
       async deleteCycle(id) { ok(await sb.rpc('delete_cycle', { p_id: id })); },
+      // Clãs rivais: leituras das planilhas de mapeamento (Scout) importadas pela liderança
+      async rivals() {
+        const s = await sb.from('rival_scans').select('*').order('scanned_on').order('id');
+        if (s.error) return null; // SQL novo ainda não rodado
+        const players = [];
+        for (let from = 0; ; from += 1000) {
+          const r = await sb.from('rival_players').select('*').order('id').range(from, from + 999);
+          if (r.error) return null;
+          players.push(...r.data);
+          if (r.data.length < 1000) break;
+        }
+        return { scans: s.data, players };
+      },
+      async importRivalScan(o) {
+        const r = await sb.rpc('import_rival_scan', { p_clan_name: o.clan_name, p_clan_number: o.clan_number ?? null,
+          p_scanned_on: o.scanned_on, p_source: o.source || null, p_players: o.players });
+        ok(r);
+        return r.data;
+      },
+      async deleteRivalScan(id) { ok(await sb.rpc('delete_rival_scan', { p_id: id })); },
       async saveProfile(fields, phone) {
         ok(await sb.from('profiles').update(fields).eq('id', state.user.id));
         if (phone !== undefined) ok(await sb.from('member_contacts').upsert({ user_id: state.user.id, phone: phone || null }));
@@ -575,6 +595,26 @@
       { id: 600, starts_on: ymd(-135), side: 'immortal' }, { id: 601, starts_on: ymd(-96), side: 'shadows' },
       { id: 602, starts_on: ymd(-54), side: 'immortal' }, { id: 603, starts_on: ymd(-19), side: 'shadows' },
     ];
+    // Clãs rivais mapeados pela liderança (planilha Scout); a Legião Sombria tem duas leituras
+    db.rivalScans = []; db.rivalPlayers = [];
+    const SYL = ['ka', 'zor', 'mi', 'rax', 'el', 'dun', 'vy', 'tho', 'ga', 'lis', 'mor', 'qu', 'ne', 'ash', 'ty'];
+    const rivalName = () => { let n = ''; const k = 2 + Math.floor(rnd() * 2); for (let i = 0; i < k; i++) n += SYL[Math.floor(rnd() * SYL.length)]; return n[0].toUpperCase() + n.slice(1); };
+    const scanDay = (d) => localDay(new Date(Date.now() + d * 86400000));
+    [['Legião Sombria', 1018267, 0.8, 92], ['Os Imortais', 1028931, 0.7, 96], ['Filhos de Lilith', 1033505, 0.6, 85]].forEach(([clan, num, f, n], ci) => {
+      const roster = Array.from({ length: n }, () => {
+        const tank = rnd() < 0.25; const b = 0.75 + rnd() * 0.6;
+        return { name: rivalName(), armor: Math.round((tank ? 8200 : 5000) * b * f), armor_pen: Math.round((tank ? 4800 : 6900) * b * f),
+          potency: Math.round((tank ? 3900 : 5200) * b * f), resistance: Math.round((tank ? 7400 : 4900) * b * f), resonance: Math.round(3900 * b * f) };
+      });
+      const reads = ci === 0 ? [-40, -6] : [-6];
+      reads.forEach((d, ri) => {
+        const id = 700 + ci * 10 + ri;
+        db.rivalScans.push({ id, clan_name: clan, clan_number: num, scanned_on: scanDay(d), source: `scout ${scanDay(d)}.mkv`, created_by: 'u0', created_at: day(d, 20) });
+        const grow = reads.length > 1 && ri === 0 ? 0.93 : 1;
+        roster.forEach((r, i) => db.rivalPlayers.push({ id: 7000 + id * 200 + i, scan_id: id, ...r,
+          ...Object.fromEntries(ATTRS.map((a) => [a.key, Math.round(r[a.key] * grow)])), note: i === 3 ? 'conferir: Armadura' : null }));
+      });
+    });
 
     // Resultados de duas Guerras passadas (as observações só a liderança vê)
     db.results.push(
@@ -945,6 +985,26 @@
       async deleteCycle(id) {
         if (!isOfficer()) throw new Error('Só oficiais e o líder gerenciam os ciclos');
         db.cycles = db.cycles.filter((c) => c.id !== id);
+      },
+      async rivals() {
+        if (!isOfficer()) return { scans: [], players: [] };
+        return { scans: db.rivalScans.map((x) => ({ ...x })), players: db.rivalPlayers.map((x) => ({ ...x })) };
+      },
+      async importRivalScan(o) {
+        if (!isOfficer()) throw new Error('Só oficiais e o líder importam clãs rivais');
+        if (!String(o.clan_name || '').trim()) throw new Error('Informe o nome do clã');
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(o.scanned_on || '') || o.scanned_on > localDay()) throw new Error('Data da leitura inválida');
+        if (!o.players?.length || o.players.length > 150) throw new Error('A leitura precisa ter de 1 a 150 jogadores');
+        const id = db.nextId++;
+        db.rivalScans.push({ id, clan_name: String(o.clan_name).trim().slice(0, 60), clan_number: o.clan_number ?? null, scanned_on: o.scanned_on,
+          source: o.source || null, created_by: state.user.id, created_at: new Date().toISOString() });
+        o.players.forEach((pl) => db.rivalPlayers.push({ id: db.nextId++, scan_id: id, ...pl }));
+        return id;
+      },
+      async deleteRivalScan(id) {
+        if (!isOfficer()) throw new Error('Só oficiais e o líder apagam leituras');
+        db.rivalScans = db.rivalScans.filter((x) => x.id !== id);
+        db.rivalPlayers = db.rivalPlayers.filter((x) => x.scan_id !== id);
       },
       async opponents() {
         return [...new Set(db.results.slice().sort((a, b) => Date.parse(b.updated_at) - Date.parse(a.updated_at)).map((r) => r.opponent).filter(Boolean))];
@@ -1336,6 +1396,10 @@
       { key: 'panel_view', label: 'Ver o menu Estatísticas', desc: 'Ícone 📊 ao lado do sininho, com os indicadores por ciclo (só esconde na tela)' },
       { key: 'cycles', label: 'Gerenciar ciclos', desc: 'Cadastrar, editar e apagar os ciclos (Sombras / Imortal)', approval: true },
     ] },
+    { group: 'Clãs rivais', items: [
+      { key: 'rivals_view', label: 'Ver os clãs rivais', desc: 'Estatísticas dos outros clãs, no menu 📊 (só esconde na tela)' },
+      { key: 'rivals_import', label: 'Importar e apagar leituras', desc: 'Enviar a planilha de mapeamento (Scout) e apagar leituras' },
+    ] },
     { group: 'Malah News', items: [
       { key: 'news_publish', label: 'Publicar e editar edições', approval: true },
       { key: 'news_delete', label: 'Apagar edições', approval: true },
@@ -1405,6 +1469,8 @@
     removeMember: (raw, id, reason) => ['member_remove', `${memberById(id)?.role === 'pending' ? 'Recusar a entrada de' : 'Remover do clã'} ${nameOf(id)}${reason ? ` · motivo: “${reason}”` : ''}`],
     saveCycle: (raw, o) => ['cycles', `${o?.id ? 'Editar o' : 'Cadastrar um'} ciclo ${o?.side === 'immortal' ? 'Imortal' : 'das Sombras'} começando em ${String(o?.starts_on || '').split('-').reverse().join('/')}`],
     deleteCycle: () => ['cycles', 'Apagar um ciclo'],
+    importRivalScan: (raw, o) => ['rivals_import', `Importar a leitura do clã ${o?.clan_name || ''}`],
+    deleteRivalScan: () => ['rivals_import', 'Apagar uma leitura de clã rival'],
     renameMember: (raw, id, name) => (id === state.user.id ? null : ['member_rename', `Trocar o nick de ${nameOf(id)} para “${String(name || '').trim()}”`]),
     setAlias: (raw, id, alias) => (id === state.user.id ? null : ['member_alias', String(alias || '').trim()
       ? `Definir o codinome de ${nameOf(id)} como “${String(alias).trim()}”` : `Apagar o codinome de ${nameOf(id)}`]),
@@ -1734,7 +1800,7 @@
           <select id="acting-select" class="inline">${accounts.map((a) => `<option value="${esc(a.id)}" ${a.id === actingId() ? 'selected' : ''}>${esc(displayName(a))}${a.id === state.user.id ? ' (você)' : ' 🧑‍✈️'}</option>`).join('')}</select>
         </label>` : ''}
         ${memberUI() ? '<div class="bell-wrap" id="bell-wrap"></div>' : ''}
-        ${memberUI() && can('panel_view') ? `<a class="gear${currentKey === 'panel' ? ' active' : ''}" href="#/estatisticas" title="Estatísticas" aria-label="Estatísticas"><span aria-hidden="true">📊</span></a>` : ''}
+        ${memberUI() && (can('panel_view') || can('rivals_view')) ? `<a class="gear${currentKey === 'panel' || currentKey === 'rivals' ? ' active' : ''}" href="${can('panel_view') ? '#/estatisticas' : '#/rivais'}" title="Estatísticas" aria-label="Estatísticas"><span aria-hidden="true">📊</span></a>` : ''}
         ${isLeader() ? `<a class="gear${currentKey === 'config' ? ' active' : ''}" href="#/config" title="Configurações" aria-label="Configurações"><span aria-hidden="true">⚙️</span></a>` : ''}
         <button class="who" id="btn-profile" title="Meu perfil">${avatar(state.me)}<span class="label">${esc(displayName(state.me))}</span></button>
         <button class="btn ghost small" id="btn-logout">Sair</button>`;
@@ -5649,6 +5715,7 @@
     const weekN = per.cycle ? Math.floor((Math.min(per.to, now) - per.from) / (7 * DAY_MS)) + 1 : null;
     main.innerHTML = `
       <div class="page-head"><h1>Estatísticas do clã</h1>
+        ${can('rivals_view') ? '<a class="btn" href="#/rivais">🛡️ Clãs rivais</a>' : ''}
         ${can('cycles') ? '<button class="btn" id="pn-cycles">🗓 Ciclos</button>' : ''}</div>
       <div class="card panel-period">
         <div class="row" style="gap:10px;flex-wrap:wrap;align-items:center">
@@ -5757,6 +5824,342 @@
     return out;
   }
   const mondayLabel = (v) => new Date(`${v}T12:00:00`).toLocaleDateString('pt-BR', { weekday: 'short', day: '2-digit', month: '2-digit', year: 'numeric' }).replace('.', '');
+
+  // =====================================================================
+  //  Clãs rivais: planilha de mapeamento (Scout) importada pela liderança
+  // =====================================================================
+
+  // Lê um .xlsx no navegador (zip + XML), sem biblioteca externa: { nomeDaAba: [[célula, ...], ...] }
+  async function readXlsx(file) {
+    const buf = new Uint8Array(await file.arrayBuffer());
+    const dv = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
+    let eocd = -1;
+    for (let i = buf.length - 22; i >= Math.max(0, buf.length - 65557); i--) if (dv.getUint32(i, true) === 0x06054b50) { eocd = i; break; }
+    if (eocd < 0) throw new Error('O arquivo não é uma planilha .xlsx válida');
+    const files = {};
+    let p = dv.getUint32(eocd + 16, true);
+    for (let n = dv.getUint16(eocd + 10, true); n > 0 && dv.getUint32(p, true) === 0x02014b50; n--) {
+      const nlen = dv.getUint16(p + 28, true);
+      files[new TextDecoder().decode(buf.subarray(p + 46, p + 46 + nlen))] = { method: dv.getUint16(p + 10, true), size: dv.getUint32(p + 20, true), off: dv.getUint32(p + 42, true) };
+      p += 46 + nlen + dv.getUint16(p + 30, true) + dv.getUint16(p + 32, true);
+    }
+    const read = async (name) => {
+      const f = files[name];
+      if (!f) return null;
+      const start = f.off + 30 + dv.getUint16(f.off + 26, true) + dv.getUint16(f.off + 28, true);
+      let data = buf.subarray(start, start + f.size);
+      if (f.method === 8) data = new Uint8Array(await new Response(new Blob([data]).stream().pipeThrough(new DecompressionStream('deflate-raw'))).arrayBuffer());
+      return new DOMParser().parseFromString(new TextDecoder().decode(data), 'application/xml');
+    };
+    const wb = await read('xl/workbook.xml');
+    if (!wb) throw new Error('O arquivo não é uma planilha .xlsx válida');
+    const rels = await read('xl/_rels/workbook.xml.rels');
+    const target = (rid) => {
+      const t = [...(rels?.getElementsByTagName('Relationship') || [])].find((x) => x.getAttribute('Id') === rid)?.getAttribute('Target') || '';
+      return t.startsWith('/') ? t.slice(1) : `xl/${t}`;
+    };
+    const ss = await read('xl/sharedStrings.xml');
+    const shared = ss ? [...ss.getElementsByTagName('si')].map((si) => [...si.getElementsByTagName('t')].map((t) => t.textContent).join('')) : [];
+    const colOf = (ref) => { let n = 0; for (const ch of ref.replace(/[^A-Z]/g, '')) n = n * 26 + ch.charCodeAt(0) - 64; return n - 1; };
+    const out = {};
+    for (const sh of wb.getElementsByTagName('sheet')) {
+      const doc = await read(target(sh.getAttribute('r:id')));
+      if (!doc) continue;
+      const rows = [];
+      for (const r of doc.getElementsByTagName('row')) {
+        const row = [];
+        for (const c of r.getElementsByTagName('c')) {
+          const ref = c.getAttribute('r');
+          const t = c.getAttribute('t');
+          const v = c.getElementsByTagName('v')[0]?.textContent;
+          let val = null;
+          if (t === 's') val = shared[Number(v)] ?? null;
+          else if (t === 'inlineStr') val = [...c.getElementsByTagName('t')].map((x) => x.textContent).join('');
+          else if (t === 'str' || t === 'e') val = v ?? null;
+          else if (v != null && v !== '') val = Number(v);
+          row[ref ? colOf(ref) : row.length] = val;
+        }
+        rows.push(row);
+      }
+      out[sh.getAttribute('name')] = rows;
+    }
+    return out;
+  }
+
+  // Monta as leituras por clã a partir da planilha, tirando os repetidos
+  function parseScout(sheets, fileName) {
+    const COLS = { clan: ['cla'], number: ['n do cla', 'no do cla', 'nº do cla', 'numero do cla'], name: ['personagem', 'nome', 'jogador'],
+      armor: ['armadura'], armor_pen: ['perfurar armadura'], potency: ['potencia'], resistance: ['resistencia'], resonance: ['ressonancia'], note: ['observacao', 'obs'] };
+    let rows = null; let idx = null;
+    for (const r of Object.values(sheets)) {
+      const head = (r[0] || []).map((h) => norm(h));
+      const find = (alts) => head.findIndex((h) => alts.includes(h));
+      if (find(COLS.name) >= 0 && find(COLS.resonance) >= 0) { rows = r.slice(1); idx = Object.fromEntries(Object.entries(COLS).map(([k, alts]) => [k, find(alts)])); break; }
+    }
+    if (!rows) throw new Error('Não encontrei as colunas Personagem e Ressonância na planilha');
+    if (idx.clan < 0) throw new Error('Não encontrei a coluna Clã na planilha');
+    const all = Object.values(sheets).flat().flat().map((v) => String(v ?? ''));
+    const dateSrc = [fileName, ...all].find((v) => /\d{4}-\d{2}-\d{2}/.test(v));
+    const found = dateSrc?.match(/(\d{4}-\d{2}-\d{2})/)?.[1];
+    const scanned_on = found && found <= localDay() ? found : localDay();
+    const video = all.find((v) => /\.(mkv|mp4|mov|avi)$/i.test(v)) || fileName;
+    const num = (v) => { const n = Number(String(v ?? '').replace(/[^\d]/g, '')); return String(v ?? '').trim() !== '' && Number.isFinite(n) ? n : null; };
+    const groups = new Map();
+    rows.forEach((r, i) => {
+      const clan = String(r[idx.clan] ?? '').trim();
+      const hasAttr = ATTRS.some((a) => num(r[idx[a.key]]) != null);
+      if (!clan || (!hasAttr && !String(r[idx.name] ?? '').trim())) return;
+      const k = norm(clan);
+      if (!groups.has(k)) groups.set(k, { clan_name: clan, numbers: {}, rows: [] });
+      const g = groups.get(k);
+      const n = idx.number >= 0 ? num(r[idx.number]) : null;
+      if (n != null) g.numbers[n] = (g.numbers[n] || 0) + 1;
+      let name = String(r[idx.name] ?? '').trim();
+      const notes = [];
+      if (idx.note >= 0 && r[idx.note]) notes.push(String(r[idx.note]).trim());
+      if (!name) { name = '(sem nome)'; notes.push('nome não lido'); } else if (/^#|�/.test(name)) notes.push('nome a conferir');
+      g.rows.push({ line: i + 2, name: name.slice(0, 60), ...Object.fromEntries(ATTRS.map((a) => [a.key, num(r[idx[a.key]])])), note: notes.join(' · ').slice(0, 200) || null });
+    });
+    // Repetido = mesmo clã e os 5 atributos iguais (o nome pode ter sido lido diferente no vídeo)
+    const nameScore = (x) => (x.name === '(sem nome)' ? 0 : /^#|�/.test(x.name) || x.name.length < 3 ? 1 : 2);
+    return [...groups.values()].map((g) => {
+      const byKey = new Map(); const dups = [];
+      g.rows.forEach((x) => {
+        const complete = ATTRS.every((a) => x[a.key] != null);
+        const key = complete ? ATTRS.map((a) => x[a.key]).join('|') : `${norm(x.name)}|${ATTRS.map((a) => x[a.key]).join('|')}`;
+        const prev = byKey.get(key);
+        if (!prev) { byKey.set(key, x); return; }
+        const keep = nameScore(x) > nameScore(prev) ? x : prev;
+        const drop = keep === x ? prev : x;
+        byKey.set(key, keep);
+        dups.push({ keep, drop });
+      });
+      const nums = Object.entries(g.numbers).sort((a, b) => b[1] - a[1]);
+      const players = [...byKey.values()];
+      return { clan_name: g.clan_name, clan_number: nums[0] ? Number(nums[0][0]) : null, otherNumbers: nums.slice(1).map(([n, c]) => `${n} (${c})`),
+        players, dups, missing: players.filter((x) => ATTRS.some((a) => x[a.key] == null)).length,
+        toCheck: players.filter((x) => x.note).length, include: true };
+    }).map((c) => ({ ...c, scanned_on, source: String(video).slice(0, 200) }));
+  }
+
+  function openScoutImport(file, after) {
+    const fail2 = (e) => { fail(e); };
+    readXlsx(file).then((sheets) => {
+      const clans = parseScout(sheets, file.name);
+      if (!clans.length) throw new Error('Nenhum jogador encontrado na planilha');
+      const existing = RIV_DATA?.scans || [];
+      const render = () => openDialog(`<form id="sc" class="stack">
+        <h2>📥 Importar planilha</h2>
+        <p class="muted small" style="margin:0">${esc(file.name)} · confira antes de salvar. Cada clã vira uma nova leitura; as anteriores continuam guardadas.</p>
+        <div class="field"><label for="sc-date">Data da leitura</label><input type="date" id="sc-date" value="${clans[0].scanned_on}" max="${localDay()}" required></div>
+        ${clans.map((c, i) => {
+          const same = existing.some((s) => norm(s.clan_name) === norm(c.clan_name) && s.scanned_on === clans[0].scanned_on);
+          return `<div class="card sc-clan">
+          <label class="sc-top"><input type="checkbox" data-sc-inc="${i}" ${c.include ? 'checked' : ''}>
+            <input type="text" data-sc-name="${i}" value="${esc(c.clan_name)}" maxlength="60" aria-label="Nome do clã"></label>
+          <div class="muted small">Nº ${c.clan_number ?? '—'} · <b>${c.players.length}</b> jogadores${c.dups.length ? ` · ${c.dups.length} repetido${c.dups.length > 1 ? 's' : ''} removido${c.dups.length > 1 ? 's' : ''}` : ''}</div>
+          <ul class="plain-list small">
+            ${c.otherNumbers.length ? `<li>⚠️ Também apareceu com outro nº: ${esc(c.otherNumbers.join(', '))}. Juntei tudo pelo nome do clã.</li>` : ''}
+            ${c.players.length > 100 ? `<li>⚠️ Mais de 100 jogadores: confira se não há alguém repetido com valores diferentes.</li>` : ''}
+            ${c.missing ? `<li>⚠️ ${c.missing} com algum atributo faltando (fica em branco nas contas).</li>` : ''}
+            ${c.toCheck ? `<li>🔎 ${c.toCheck} marcado${c.toCheck > 1 ? 's' : ''} para conferir (observação da planilha ou nome estranho).</li>` : ''}
+            ${same ? '<li>ℹ️ Já existe uma leitura deste clã nesta data. Ela será guardada como outra leitura.</li>' : ''}
+          </ul>
+          ${c.dups.length ? `<details><summary class="small">Ver os repetidos removidos</summary><table class="mini-table"><thead><tr><th>Ficou</th><th>Removido</th><th>Linha</th></tr></thead><tbody>
+            ${c.dups.map((d) => `<tr><td>${esc(d.keep.name)}</td><td class="muted">${esc(d.drop.name)}</td><td class="muted">${d.drop.line}</td></tr>`).join('')}</tbody></table></details>` : ''}
+        </div>`;
+        }).join('')}
+        <div class="row end"><button type="button" class="btn ghost" data-close>Cancelar</button><button class="btn primary" id="sc-go">Importar</button></div>
+      </form>`, (d) => {
+        $('#sc', d).addEventListener('submit', async (e) => {
+          e.preventDefault();
+          const date = $('#sc-date', d).value;
+          clans.forEach((c, i) => { c.include = $(`[data-sc-inc="${i}"]`, d).checked; c.clan_name = $(`[data-sc-name="${i}"]`, d).value.trim() || c.clan_name; });
+          const go = clans.filter((c) => c.include);
+          if (!go.length) { toast('Marque ao menos um clã', true); return; }
+          const btn = $('#sc-go', d); btn.disabled = true; btn.textContent = 'Importando…';
+          try {
+            for (const c of go) {
+              await api.importRivalScan({ clan_name: c.clan_name, clan_number: c.clan_number, scanned_on: date, source: c.source,
+                players: c.players.map(({ line, ...x }) => x) });
+            }
+            dlg.close();
+            toast(`${go.length} clã${go.length > 1 ? 's' : ''} importado${go.length > 1 ? 's' : ''}`);
+            await after();
+          } catch (err) { btn.disabled = false; btn.textContent = 'Importar'; fail(err); }
+        });
+      });
+      render();
+    }).catch(fail2);
+  }
+
+  const RIV = { stat: 'avg', clan: '', attr: 'resonance', q: '' };
+  let RIV_DATA = null;
+  const RIV_STATS = { avg: 'Média', median: 'Mediana', top10: 'Média do Top 10' };
+  const RIV_BANDS = [[6000, Infinity, '6.000+'], [5000, 6000, '5.000–5.999'], [4000, 5000, '4.000–4.999'], [3000, 4000, '3.000–3.999'], [0, 3000, 'até 2.999']];
+
+  function statOf(list, key, mode) {
+    const v = list.map((x) => Number(x[key])).filter((n) => Number.isFinite(n) && n > 0).sort((a, b) => b - a);
+    if (!v.length) return null;
+    if (mode === 'median') return v.length % 2 ? v[(v.length - 1) / 2] : (v[v.length / 2 - 1] + v[v.length / 2]) / 2;
+    const use = mode === 'top10' ? v.slice(0, 10) : v;
+    return use.reduce((s, n) => s + n, 0) / use.length;
+  }
+
+  async function viewRivals(keepScroll) {
+    if (!can('rivals_view')) { location.hash = '#/'; return; }
+    if (!keepScroll || !RIV_DATA) { loading(); RIV_DATA = await api.rivals().catch(() => null); }
+    const y = keepScroll ? scrollY : 0;
+    const data = RIV_DATA;
+    const head = `<div class="page-head"><h1>Clãs rivais</h1>
+      ${can('panel_view') ? '<a class="btn ghost" href="#/estatisticas">📊 Estatísticas do clã</a>' : ''}
+      ${can('rivals_import') ? '<button class="btn primary" id="rv-import">📥 Importar planilha</button><input type="file" id="rv-file" accept=".xlsx" hidden>' : ''}</div>`;
+    const bind = () => {
+      $('#rv-import')?.addEventListener('click', () => $('#rv-file').click());
+      $('#rv-file')?.addEventListener('change', (e) => { const f = e.target.files[0]; e.target.value = ''; if (f) openScoutImport(f, () => viewRivals()); });
+    };
+    if (!data) { main.innerHTML = `${head}<div class="card empty">Os clãs rivais ainda não estão ativos no banco. Rode o arquivo <code>supabase/clas_rivais.sql</code> no Supabase.</div>`; bind(); return; }
+    if (!data.scans.length) {
+      main.innerHTML = `${head}<div class="card empty">Nenhum clã mapeado ainda.${can('rivals_import') ? ' Use <b>📥 Importar planilha</b> para enviar o arquivo .xlsx do Scout (colunas Clã, Nº do clã, Personagem, os 5 atributos e Observação).' : ''}</div>`;
+      bind(); return;
+    }
+    // Clãs: a leitura mais recente de cada um vale para as comparações
+    const playersBy = {};
+    data.players.forEach((x) => { (playersBy[x.scan_id] ||= []).push(x); });
+    const clanMap = new Map();
+    data.scans.forEach((sc) => {
+      const k = norm(sc.clan_name);
+      if (!clanMap.has(k)) clanMap.set(k, { key: k, scans: [] });
+      clanMap.get(k).scans.push(sc);
+    });
+    const clans = [...clanMap.values()].map((c) => {
+      c.scans.sort((a, b) => a.scanned_on.localeCompare(b.scanned_on) || a.id - b.id);
+      c.last = c.scans[c.scans.length - 1];
+      c.name = c.last.clan_name;
+      c.players = playersBy[c.last.id] || [];
+      return c;
+    });
+    const us = { key: '__us', name: 'INFERNUM', us: true, players: activeMembers() };
+    const statK = RIV.stat in RIV_STATS ? RIV.stat : 'avg';
+    clans.sort((a, b) => (statOf(b.players, 'resonance', statK) || 0) - (statOf(a.players, 'resonance', statK) || 0));
+    const rowsAll = [us, ...clans];
+    const fmt0 = (v) => (v == null ? '—' : fmtNum(Math.round(v)));
+    const dmyS = (ymd) => ymd.split('-').reverse().join('/');
+
+    // ----- Comparativo -----
+    const ourStat = Object.fromEntries(ATTRS.map((a) => [a.key, statOf(us.players, a.key, statK)]));
+    const best = Object.fromEntries(ATTRS.map((a) => [a.key, Math.max(...rowsAll.map((r) => statOf(r.players, a.key, statK) || 0))]));
+    const cmpTable = `<div class="table-scroll"><table class="mini-table rv-cmp"><thead><tr><th>Clã</th><th>Jog.</th>${ATTRS.map((a) => `<th title="${esc(a.label)}">${a.short}</th>`).join('')}<th>Leitura</th></tr></thead><tbody>
+      ${rowsAll.map((r) => `<tr class="${r.us ? 'rv-us' : ''}"><td>${r.us ? '<b>🔥 INFERNUM</b>' : `<a href="#" data-rv-clan="${esc(r.key)}">${esc(r.name)}</a>`}</td><td>${r.players.length}</td>
+        ${ATTRS.map((a) => {
+          const v = statOf(r.players, a.key, statK);
+          const d = !r.us && v != null && ourStat[a.key] ? (v - ourStat[a.key]) / ourStat[a.key] : null;
+          return `<td class="${v != null && Math.round(v) === Math.round(best[a.key]) ? 'rv-best' : ''}">${fmt0(v)}${d != null && Math.abs(d) >= 0.005
+            ? `<div class="rv-delta ${d > 0 ? 'c-no' : 'c-yes'}">${d > 0 ? '▲' : '▼'} ${Math.abs(Math.round(d * 100))}%</div>` : ''}</td>`;
+        }).join('')}
+        <td class="muted small">${r.us ? 'perfis' : dmyS(r.last.scanned_on)}</td></tr>`).join('')}
+      </tbody></table></div>
+      <div class="muted small">▲ o rival está acima do INFERNUM · ▼ está abaixo · em dourado, o melhor de cada atributo. Do INFERNUM contam os membros ativos com o atributo preenchido no perfil.</div>`;
+
+    // ----- Ressonância por faixa -----
+    const bandTable = `<div class="table-scroll"><table class="mini-table"><thead><tr><th>Clã</th>${RIV_BANDS.map((b) => `<th>${b[2]}</th>`).join('')}</tr></thead><tbody>
+      ${rowsAll.map((r) => {
+        const v = r.players.map((x) => Number(x.resonance)).filter((n) => n > 0);
+        return `<tr class="${r.us ? 'rv-us' : ''}"><td>${r.us ? '<b>🔥 INFERNUM</b>' : esc(r.name)}</td>${RIV_BANDS.map(([lo, hi]) => {
+          const n = v.filter((x) => x >= lo && x < hi).length;
+          return `<td title="${n} jogador${n === 1 ? '' : 'es'}">${v.length ? `${Math.round((100 * n) / v.length)}%` : '—'}<span class="muted small"> (${n})</span></td>`;
+        }).join('')}</tr>`;
+      }).join('')}</tbody></table></div>`;
+
+    // ----- Clã em detalhe -----
+    const sel = clans.find((c) => c.key === RIV.clan) || clans[0];
+    RIV.clan = sel.key;
+    const attr = ATTRS.find((a) => a.key === RIV.attr) || ATTRS.find((a) => a.key === 'resonance');
+    const sorted = sel.players.slice().sort((a, b) => (Number(b[attr.key]) || 0) - (Number(a[attr.key]) || 0));
+    const top = sorted.filter((x) => Number(x[attr.key]) > 0).slice(0, 10);
+    const ourTop = statOf(us.players, attr.key, 'top10');
+    const history = sel.scans.slice().reverse().map((sc, i, arr) => {
+      const pl = playersBy[sc.id] || [];
+      const prevPl = arr[i + 1] ? playersBy[arr[i + 1].id] || [] : null;
+      return `<tr><td>${dmyS(sc.scanned_on)}</td><td>${pl.length}</td>${ATTRS.map((a) => {
+        const v = statOf(pl, a.key, 'avg'); const pv = prevPl ? statOf(prevPl, a.key, 'avg') : null;
+        const d = v != null && pv ? (v - pv) / pv : null;
+        return `<td>${fmt0(v)}${d != null && Math.abs(d) >= 0.005 ? `<div class="rv-delta ${d > 0 ? 'c-no' : 'c-yes'}">${d > 0 ? '▲' : '▼'} ${Math.abs(Math.round(d * 100))}%</div>` : ''}</td>`;
+      }).join('')}<td>${can('rivals_import') ? `<button class="btn small ghost" data-rv-del="${sc.id}" title="Apagar esta leitura">🗑</button>` : ''}</td></tr>`;
+    }).join('');
+    const detail = `
+      <div class="evo-tabs" role="tablist">${clans.map((c) => `<button type="button" class="evo-tab" role="tab" data-rv-clan="${esc(c.key)}" aria-selected="${c.key === sel.key}">${esc(c.name)}</button>`).join('')}</div>
+      <div class="kpi-grid">
+        ${kpi('👥', 'Jogadores', sel.players.length, `Nº ${sel.last.clan_number ?? '—'}`)}
+        ${kpi('💠', 'Ressonância média', fmt0(statOf(sel.players, 'resonance', 'avg')), `INFERNUM: ${fmt0(statOf(us.players, 'resonance', 'avg'))}`)}
+        ${kpi('🏅', 'Ressonância Top 10', fmt0(statOf(sel.players, 'resonance', 'top10')), `INFERNUM: ${fmt0(statOf(us.players, 'resonance', 'top10'))}`)}
+        ${kpi('📅', 'Última leitura', dmyS(sel.last.scanned_on), `${sel.scans.length} leitura${sel.scans.length > 1 ? 's' : ''}`)}
+      </div>
+      <div class="chart-grid">
+        <div class="card chart wide"><h4>🏆 Top 10 · ${esc(sel.name)}</h4>
+          <div class="evo-tabs" role="tablist">${ATTRS.slice().sort((a, b) => (a.key === 'resonance' ? -1 : b.key === 'resonance' ? 1 : 0))
+            .map((a) => `<button type="button" class="evo-tab" role="tab" data-rv-attr="${a.key}" aria-selected="${a.key === attr.key}">${esc(a.label)}</button>`).join('')}</div>
+          ${top.length ? hbars(top.map((x) => ({ label: x.name, value: Number(x[attr.key]), title: `${x.name}: ${fmtNum(Number(x[attr.key]))}${x.note ? ` · ${x.note}` : ''}` })), { fmt: fmtNum }) : '<div class="muted small">Sem valores.</div>'}
+          <div class="muted small">Média do Top 10: <b>${fmt0(statOf(sel.players, attr.key, 'top10'))}</b> · INFERNUM: <b>${fmt0(ourTop)}</b></div></div>
+        <div class="card chart wide"><h4>📅 Leituras</h4>
+          <div class="table-scroll"><table class="mini-table"><thead><tr><th>Data</th><th>Jog.</th>${ATTRS.map((a) => `<th title="Média de ${esc(a.label)}">${a.short}</th>`).join('')}<th></th></tr></thead><tbody>${history}</tbody></table></div>
+          <div class="muted small">Médias de cada leitura · as setas comparam com a leitura anterior.</div></div>
+        <div class="card chart wide"><details><summary><b>Ver os ${sel.players.length} jogadores</b> <span class="muted small">· ordenados por ${esc(attr.label)}</span></summary>
+          <div class="table-scroll"><table class="mini-table"><thead><tr><th>#</th><th>Jogador</th>${ATTRS.map((a) => `<th>${a.short}</th>`).join('')}</tr></thead><tbody>
+          ${sorted.map((x, i) => `<tr><td class="muted">${i + 1}</td><td>${esc(x.name)}${x.note ? ` <span title="${esc(x.note)}">⚠️</span>` : ''}</td>${ATTRS.map((a) => `<td>${fmt0(x[a.key])}</td>`).join('')}</tr>`).join('')}
+          </tbody></table></div></details></div>
+      </div>`;
+
+    main.innerHTML = `${head}
+      <section class="stats-section">
+        <h3>🛡️ Comparativo <span class="muted small">· última leitura de cada clã</span>
+          <select id="rv-stat" aria-label="Como comparar">${Object.entries(RIV_STATS).map(([k, l]) => `<option value="${k}" ${k === statK ? 'selected' : ''}>${l}</option>`).join('')}</select></h3>
+        <div class="chart-grid">
+          <div class="card chart wide">${cmpTable}</div>
+          <div class="card chart wide"><h4>💠 Ressonância por faixa</h4>${bandTable}</div>
+        </div>
+      </section>
+      <section class="stats-section">
+        <h3>🔍 Clã em detalhe</h3>
+        ${detail}
+      </section>
+      <section class="stats-section">
+        <h3>🔎 Buscar jogador</h3>
+        <div class="card chart">
+          <input type="search" id="rv-q" placeholder="Nome do jogador rival…" value="${esc(RIV.q)}" autocomplete="off">
+          <div id="rv-found"></div>
+        </div>
+      </section>`;
+    bind();
+
+    // Busca: todas as leituras; mostra a mais recente de cada jogador
+    const allRows = data.scans.slice().sort((a, b) => b.scanned_on.localeCompare(a.scanned_on) || b.id - a.id)
+      .flatMap((sc) => (playersBy[sc.id] || []).map((x) => ({ ...x, clan: sc.clan_name, on: sc.scanned_on })));
+    const search = () => {
+      const q = norm(RIV.q);
+      const box = $('#rv-found');
+      if (q.length < 2) { box.innerHTML = '<div class="muted small" style="margin-top:8px">Digite ao menos 2 letras.</div>'; return; }
+      const seen = new Set();
+      const hits = allRows.filter((x) => norm(x.name).includes(q)).filter((x) => { const k = `${norm(x.clan)}|${norm(x.name)}`; if (seen.has(k)) return false; seen.add(k); return true; }).slice(0, 50);
+      box.innerHTML = hits.length ? `<div class="table-scroll"><table class="mini-table" style="margin-top:8px"><thead><tr><th>Jogador</th><th>Clã</th>${ATTRS.map((a) => `<th>${a.short}</th>`).join('')}<th>Leitura</th></tr></thead><tbody>
+        ${hits.map((x) => `<tr><td>${esc(x.name)}${x.note ? ` <span title="${esc(x.note)}">⚠️</span>` : ''}</td><td>${esc(x.clan)}</td>${ATTRS.map((a) => `<td>${fmt0(x[a.key])}</td>`).join('')}<td class="muted small">${dmyS(x.on)}</td></tr>`).join('')}
+        </tbody></table></div>` : '<div class="muted small" style="margin-top:8px">Nenhum jogador encontrado.</div>';
+    };
+    search();
+    $('#rv-q').addEventListener('input', (e) => { RIV.q = e.target.value; search(); });
+    $('#rv-stat').addEventListener('change', (e) => { RIV.stat = e.target.value; viewRivals(true); });
+    main.querySelectorAll('[data-rv-clan]').forEach((b) => b.addEventListener('click', (e) => {
+      e.preventDefault(); RIV.clan = b.dataset.rvClan;
+      viewRivals(true).then(() => { if (b.tagName === 'A') main.querySelector('.evo-tab[aria-selected="true"]')?.scrollIntoView({ block: 'center' }); });
+    }));
+    main.querySelectorAll('[data-rv-attr]').forEach((b) => b.addEventListener('click', () => { RIV.attr = b.dataset.rvAttr; viewRivals(true); }));
+    main.querySelectorAll('[data-rv-del]').forEach((b) => b.addEventListener('click', async () => {
+      const sc = data.scans.find((x) => x.id === Number(b.dataset.rvDel));
+      if (!(await confirmDialog(`Apagar a leitura de ${sc.clan_name} do dia ${dmyS(sc.scanned_on)}? Os jogadores dessa leitura também serão apagados.`, 'Apagar'))) return;
+      try { await api.deleteRivalScan(sc.id); toast('Leitura apagada'); await viewRivals(); } catch (err) { fail(err); }
+    }));
+    if (keepScroll) window.scrollTo(0, y);
+  }
 
   // Cadastro dos ciclos (Sombras / Imortal): começa numa segunda e termina no domingo antes do próximo
   function openCyclesDialog(cycles, after) {
@@ -6588,7 +6991,7 @@
     const mp = h.match(/^\/membro\/([\w%-]+)$/); // perfil de um membro (oficiais e líder)
     const rc = RECRUIT_ON ? h.match(/^\/recrutamento\/(\d+)$/) : null;
     const tk = TICKETS_ON ? h.match(/^\/ticket\/(\d+)$/) : null;
-    const key = h === '/passados' ? 'past' : h === '/frequencia' ? 'freq' : h === '/estatisticas' ? 'panel' : h === '/news' ? 'news' : h === '/utils' ? 'utils'
+    const key = h === '/passados' ? 'past' : h === '/frequencia' ? 'freq' : h === '/estatisticas' ? 'panel' : h === '/rivais' ? 'rivals' : h === '/news' ? 'news' : h === '/utils' ? 'utils'
       : h === '/config' ? 'config' : h === '/solicitacoes' ? 'requests'
       : RECRUIT_ON && h === '/recrutamentos' ? 'recruits' : rc ? 'recruits'
       : TICKETS_ON && h === '/tickets' ? 'tickets' : TICKETS_ON && h === '/atendimento' ? 'support' : tk ? 'ticket'
@@ -6624,6 +7027,7 @@
       else if (key === 'members') await viewMembers();
       else if (key === 'freq') await viewFrequency();
       else if (key === 'panel') await viewPanel();
+      else if (key === 'rivals') await viewRivals();
       else if (key === 'teams') await viewTeams(Number(tm[1]));
       else if (key === 'event') await viewEvent(Number(ev[1]));
       else await viewEvents(false);
