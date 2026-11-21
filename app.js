@@ -233,7 +233,8 @@
           players.push(...r.data);
           if (r.data.length < 1000) break;
         }
-        return { scans: s.data, players };
+        const log = await sb.from('rival_scan_log').select('*').order('created_at', { ascending: false }).limit(300);
+        return { scans: s.data, players, log: log.error ? [] : log.data };
       },
       async importRivalScan(o) {
         const r = await sb.rpc('import_rival_scan', { p_clan_name: o.clan_name, p_clan_number: o.clan_number ?? null,
@@ -596,7 +597,9 @@
       { id: 602, starts_on: ymd(-54), side: 'immortal' }, { id: 603, starts_on: ymd(-19), side: 'shadows' },
     ];
     // Clãs rivais mapeados pela liderança (planilha Scout); a Legião Sombria tem duas leituras
-    db.rivalScans = []; db.rivalPlayers = [];
+    db.rivalScans = []; db.rivalPlayers = []; db.rivalLog = [
+      { id: 899, scan_id: 799, action: 'import', clan_name: 'Os Imortais', scanned_on: localDay(new Date(Date.now() - 9 * 86400000)), players: 97, actor_clan: 'FOR HONOR', actor_name: 'Valkyria', created_at: day(-9, 21) },
+      { id: 898, scan_id: 799, action: 'delete', clan_name: 'Os Imortais', scanned_on: localDay(new Date(Date.now() - 9 * 86400000)), players: 97, actor_clan: 'INFERNUM', actor_name: 'Sangrento', created_at: day(-7, 10) }];
     const SYL = ['ka', 'zor', 'mi', 'rax', 'el', 'dun', 'vy', 'tho', 'ga', 'lis', 'mor', 'qu', 'ne', 'ash', 'ty'];
     const rivalName = () => { let n = ''; const k = 2 + Math.floor(rnd() * 2); for (let i = 0; i < k; i++) n += SYL[Math.floor(rnd() * SYL.length)]; return n[0].toUpperCase() + n.slice(1); };
     const scanDay = (d) => localDay(new Date(Date.now() + d * 86400000));
@@ -609,7 +612,9 @@
       const reads = ci === 0 ? [-40, -6] : [-6];
       reads.forEach((d, ri) => {
         const id = 700 + ci * 10 + ri;
-        db.rivalScans.push({ id, clan_name: clan, clan_number: num, scanned_on: scanDay(d), source: `scout ${scanDay(d)}.mkv`, created_by: 'u0', created_at: day(d, 20) });
+        db.rivalScans.push({ id, clan_name: clan, clan_number: num, scanned_on: scanDay(d), source: `scout ${scanDay(d)}.mkv`, created_by: 'u0', created_at: day(d, 20), imported_by: ci === 0 && ri === 0 ? 'FOR HONOR' : 'INFERNUM', imported_by_name: ci === 0 && ri === 0 ? 'Valkyria' : 'Sangrento' });
+        db.rivalLog.push({ id: 900 + id, scan_id: id, action: 'import', clan_name: clan, scanned_on: scanDay(d), players: n,
+          actor_clan: ci === 0 && ri === 0 ? 'FOR HONOR' : 'INFERNUM', actor_name: ci === 0 && ri === 0 ? 'Valkyria' : 'Sangrento', created_at: day(d, 20) });
         const grow = reads.length > 1 && ri === 0 ? 0.93 : 1;
         roster.forEach((r, i) => db.rivalPlayers.push({ id: 7000 + id * 200 + i, scan_id: id, ...r,
           ...Object.fromEntries(ATTRS.map((a) => [a.key, Math.round(r[a.key] * grow)])), note: i === 3 ? 'conferir: Armadura' : null }));
@@ -988,7 +993,8 @@
       },
       async rivals() {
         if (!isOfficer()) return { scans: [], players: [] };
-        return { scans: db.rivalScans.map((x) => ({ ...x })), players: db.rivalPlayers.map((x) => ({ ...x })) };
+        return { scans: db.rivalScans.map((x) => ({ ...x })), players: db.rivalPlayers.map((x) => ({ ...x })),
+          log: db.rivalLog.slice().sort((a, b) => b.created_at.localeCompare(a.created_at)).map((x) => ({ ...x })) };
       },
       async importRivalScan(o) {
         if (!isOfficer()) throw new Error('Só oficiais e o líder importam clãs rivais');
@@ -997,12 +1003,17 @@
         if (!o.players?.length || o.players.length > 150) throw new Error('A leitura precisa ter de 1 a 150 jogadores');
         const id = db.nextId++;
         db.rivalScans.push({ id, clan_name: String(o.clan_name).trim().slice(0, 60), clan_number: o.clan_number ?? null, scanned_on: o.scanned_on,
-          source: o.source || null, created_by: state.user.id, created_at: new Date().toISOString() });
+          source: o.source || null, created_by: state.user.id, created_at: new Date().toISOString(), imported_by: 'INFERNUM' });
         o.players.forEach((pl) => db.rivalPlayers.push({ id: db.nextId++, scan_id: id, ...pl }));
+        db.rivalLog.push({ id: db.nextId++, scan_id: id, action: 'import', clan_name: String(o.clan_name).trim(), scanned_on: o.scanned_on,
+          players: o.players.length, actor_clan: 'INFERNUM', actor_name: displayName(state.me), created_at: new Date().toISOString() });
         return id;
       },
       async deleteRivalScan(id) {
         if (!isOfficer()) throw new Error('Só oficiais e o líder apagam leituras');
+        const sc = db.rivalScans.find((x) => x.id === id);
+        if (sc) db.rivalLog.push({ id: db.nextId++, scan_id: id, action: 'delete', clan_name: sc.clan_name, scanned_on: sc.scanned_on,
+          players: db.rivalPlayers.filter((x) => x.scan_id === id).length, actor_clan: 'INFERNUM', actor_name: displayName(state.me), created_at: new Date().toISOString() });
         db.rivalScans = db.rivalScans.filter((x) => x.id !== id);
         db.rivalPlayers = db.rivalPlayers.filter((x) => x.scan_id !== id);
       },
@@ -6081,12 +6092,18 @@
     const history = sel.scans.slice().reverse().map((sc, i, arr) => {
       const pl = playersBy[sc.id] || [];
       const prevPl = arr[i + 1] ? playersBy[arr[i + 1].id] || [] : null;
-      return `<tr><td>${dmyS(sc.scanned_on)}</td><td>${pl.length}</td>${ATTRS.map((a) => {
+      return `<tr><td>${dmyS(sc.scanned_on)}</td><td class="small">${esc(sc.imported_by || 'INFERNUM')}${sc.imported_by_name ? `<div class="muted">${esc(sc.imported_by_name)}</div>` : ''}</td><td>${pl.length}</td>${ATTRS.map((a) => {
         const v = statOf(pl, a.key, 'avg'); const pv = prevPl ? statOf(prevPl, a.key, 'avg') : null;
         const d = v != null && pv ? (v - pv) / pv : null;
         return `<td>${fmt0(v)}${d != null && Math.abs(d) >= 0.005 ? `<div class="rv-delta ${d > 0 ? 'c-no' : 'c-yes'}">${d > 0 ? '▲' : '▼'} ${Math.abs(Math.round(d * 100))}%</div>` : ''}</td>`;
       }).join('')}<td>${can('rivals_import') ? `<button class="btn small ghost" data-rv-del="${sc.id}" title="Apagar esta leitura">🗑</button>` : ''}</td></tr>`;
     }).join('');
+    const whenTxt = (iso) => new Date(iso).toLocaleString('pt-BR', { day: '2-digit', month: '2-digit', year: '2-digit', hour: '2-digit', minute: '2-digit' });
+    const clanLog = (data.log || []).filter((l) => norm(l.clan_name) === sel.key).slice(0, 20);
+    const logHtml = clanLog.length ? `<ul class="plain-list small rv-log">${clanLog.map((l) => `<li>${l.action === 'delete' ? '🗑' : '📥'} <b>${esc(l.actor_name || 'Desconhecido')}</b> <span class="muted">(${esc(l.actor_clan)})</span>
+      ${l.action === 'delete' ? '<span class="c-no">apagou</span>' : 'importou'} a leitura de ${l.scanned_on ? dmyS(l.scanned_on) : '—'}${l.players != null ? ` (${l.players} jogadores)` : ''}
+      <span class="muted">· ${whenTxt(l.created_at)}</span></li>`).join('')}</ul>`
+      : '<div class="muted small">Nenhum registro ainda.</div>';
     const detail = `
       <div class="evo-tabs" role="tablist">${clans.map((c) => `<button type="button" class="evo-tab" role="tab" data-rv-clan="${esc(c.key)}" aria-selected="${c.key === sel.key}">${esc(c.name)}</button>`).join('')}</div>
       <div class="kpi-grid">
@@ -6102,8 +6119,9 @@
           ${top.length ? hbars(top.map((x) => ({ label: x.name, value: Number(x[attr.key]), title: `${x.name}: ${fmtNum(Number(x[attr.key]))}${x.note ? ` · ${x.note}` : ''}` })), { fmt: fmtNum }) : '<div class="muted small">Sem valores.</div>'}
           <div class="muted small">Média do Top 10: <b>${fmt0(statOf(sel.players, attr.key, 'top10'))}</b> · INFERNUM: <b>${fmt0(ourTop)}</b></div></div>
         <div class="card chart wide"><h4>📅 Leituras</h4>
-          <div class="table-scroll"><table class="mini-table"><thead><tr><th>Data</th><th>Jog.</th>${ATTRS.map((a) => `<th title="Média de ${esc(a.label)}">${a.short}</th>`).join('')}<th></th></tr></thead><tbody>${history}</tbody></table></div>
-          <div class="muted small">Médias de cada leitura · as setas comparam com a leitura anterior.</div></div>
+          <div class="table-scroll"><table class="mini-table"><thead><tr><th>Data</th><th title="Clã que importou a leitura">Por</th><th>Jog.</th>${ATTRS.map((a) => `<th title="Média de ${esc(a.label)}">${a.short}</th>`).join('')}<th></th></tr></thead><tbody>${history}</tbody></table></div>
+          <div class="muted small">Médias de cada leitura · as setas comparam com a leitura anterior · “Por” é o clã e quem importou (as leituras são compartilhadas com a FOR HONOR).</div></div>
+        <div class="card chart wide"><h4>📝 Registro · ${esc(sel.name)}</h4>${logHtml}</div>
         <div class="card chart wide"><details><summary><b>Ver os ${sel.players.length} jogadores</b> <span class="muted small">· ordenados por ${esc(attr.label)}</span></summary>
           <div class="table-scroll"><table class="mini-table"><thead><tr><th>#</th><th>Jogador</th>${ATTRS.map((a) => `<th>${a.short}</th>`).join('')}</tr></thead><tbody>
           ${sorted.map((x, i) => `<tr><td class="muted">${i + 1}</td><td>${esc(x.name)}${x.note ? ` <span title="${esc(x.note)}">⚠️</span>` : ''}</td>${ATTRS.map((a) => `<td>${fmt0(x[a.key])}</td>`).join('')}</tr>`).join('')}
