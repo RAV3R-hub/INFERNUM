@@ -5996,7 +5996,7 @@
   const RIV = { stat: 'avg', clan: '', attr: 'resonance', q: '' };
   let RIV_DATA = null;
   const RIV_STATS = { avg: 'Média', median: 'Mediana', top10: 'Média do Top 10' };
-  const RIV_BANDS = [[6000, Infinity, '6.000+'], [5000, 6000, '5.000–5.999'], [4000, 5000, '4.000–4.999'], [3000, 4000, '3.000–3.999'], [0, 3000, 'até 2.999']];
+  const RIV_BANDS = [[0, 4000, 'até 3.999'], [4000, 6000, '4.000–5.999'], [6000, 8000, '6.000–7.999'], [8000, 10000, '8.000–9.999'], [10000, 12000, '10.000–11.999'], [12000, Infinity, '12.000+']];
 
   function statOf(list, key, mode) {
     const v = list.map((x) => Number(x[key])).filter((n) => Number.isFinite(n) && n > 0).sort((a, b) => b - a);
