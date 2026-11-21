@@ -603,7 +603,7 @@
     const SYL = ['ka', 'zor', 'mi', 'rax', 'el', 'dun', 'vy', 'tho', 'ga', 'lis', 'mor', 'qu', 'ne', 'ash', 'ty'];
     const rivalName = () => { let n = ''; const k = 2 + Math.floor(rnd() * 2); for (let i = 0; i < k; i++) n += SYL[Math.floor(rnd() * SYL.length)]; return n[0].toUpperCase() + n.slice(1); };
     const scanDay = (d) => localDay(new Date(Date.now() + d * 86400000));
-    [['Legião Sombria', 1018267, 0.8, 92], ['Os Imortais', 1028931, 0.7, 96], ['Filhos de Lilith', 1033505, 0.6, 85]].forEach(([clan, num, f, n], ci) => {
+    [['Legião Sombria', 1104410, 0.8, 92], ['Os Imortais', 1105522, 0.7, 96], ['Filhos de Lilith', 1106633, 0.6, 85]].forEach(([clan, num, f, n], ci) => {
       const roster = Array.from({ length: n }, () => {
         const tank = rnd() < 0.25; const b = 0.75 + rnd() * 0.6;
         return { name: rivalName(), armor: Math.round((tank ? 8200 : 5000) * b * f), armor_pen: Math.round((tank ? 4800 : 6900) * b * f),
@@ -5964,7 +5964,8 @@
         <p class="muted small" style="margin:0">${esc(file.name)} · confira antes de salvar. Cada clã vira uma nova leitura; as anteriores continuam guardadas.</p>
         <div class="field"><label for="sc-date">Data da leitura</label><input type="date" id="sc-date" value="${clans[0].scanned_on}" max="${localDay()}" required></div>
         ${clans.map((c, i) => {
-          const same = existing.some((s) => norm(s.clan_name) === norm(c.clan_name) && s.scanned_on === clans[0].scanned_on);
+          const same = existing.some((s) => sameClan(s, c) && s.scanned_on === clans[0].scanned_on);
+          const known = existing.filter((s) => sameClan(s, c) && norm(s.clan_name) !== norm(c.clan_name)).map((s) => s.clan_name);
           return `<div class="card sc-clan">
           <label class="sc-top"><input type="checkbox" data-sc-inc="${i}" ${c.include ? 'checked' : ''}>
             <input type="text" data-sc-name="${i}" value="${esc(c.clan_name)}" maxlength="60" aria-label="Nome do clã"></label>
@@ -5975,6 +5976,7 @@
             ${c.missing ? `<li>⚠️ ${c.missing} com algum atributo faltando (fica em branco nas contas).</li>` : ''}
             ${c.toCheck ? `<li>🔎 ${c.toCheck} marcado${c.toCheck > 1 ? 's' : ''} para conferir (observação da planilha ou nome estranho).</li>` : ''}
             ${same ? '<li>ℹ️ Já existe uma leitura deste clã nesta data. Ela será guardada como outra leitura.</li>' : ''}
+            ${known.length ? `<li>🔗 Parece ser o mesmo clã já mapeado como “${esc(known[known.length - 1])}” (nome e número parecidos): as leituras ficam juntas.</li>` : ''}
           </ul>
           ${c.dups.length ? `<details><summary class="small">Ver os repetidos removidos</summary><table class="mini-table"><thead><tr><th>Ficou</th><th>Removido</th><th>Linha</th></tr></thead><tbody>
             ${c.dups.map((d) => `<tr><td>${esc(d.keep.name)}</td><td class="muted">${esc(d.drop.name)}</td><td class="muted">${d.drop.line}</td></tr>`).join('')}</tbody></table></details>` : ''}
@@ -6009,6 +6011,44 @@
   const RIV_STATS = { avg: 'Média', median: 'Mediana', top10: 'Média do Top 10' };
   const RIV_BANDS = [[0, 4000, 'até 3.999'], [4000, 6000, '4.000–5.999'], [6000, 8000, '6.000–7.999'], [8000, 10000, '8.000–9.999'], [10000, 12000, '10.000–11.999'], [12000, Infinity, '12.000+']];
 
+  // Mesmo clã em importações diferentes: o vídeo às vezes lê o nome ou o número com um erro
+  function editDist(a, b) {
+    if (Math.abs(a.length - b.length) > 3) return 99;
+    let prev = Array.from({ length: b.length + 1 }, (_, j) => j);
+    for (let i = 1; i <= a.length; i++) {
+      const cur = [i];
+      for (let j = 1; j <= b.length; j++) cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+      prev = cur;
+    }
+    return prev[b.length];
+  }
+  const nearNumber = (x, y) => {
+    if (x == null || y == null) return true; // sem número: decide pelo nome
+    const a = String(x); const b = String(y);
+    return a.length === b.length && [...a].filter((ch, i) => ch !== b[i]).length <= 1;
+  };
+  function sameClan(a, b) {
+    if (a.clan_number != null && a.clan_number === b.clan_number) return true;
+    const na = norm(a.clan_name); const nb = norm(b.clan_name);
+    const similar = na === nb || editDist(na, nb) <= (Math.min(na.length, nb.length) >= 8 ? 2 : 1);
+    return similar && nearNumber(a.clan_number, b.clan_number);
+  }
+  // Agrupa as leituras por clã: [{ key, scans: [...] }]
+  function groupClans(scans) {
+    const groups = [];
+    scans.forEach((sc) => {
+      const g = groups.find((x) => x.scans.some((y) => sameClan(y, sc)));
+      if (g) g.scans.push(sc); else groups.push({ scans: [sc] });
+    });
+    // junta grupos que ficaram ligados por leituras novas
+    for (let i = 0; i < groups.length; i++) {
+      for (let j = i + 1; j < groups.length; j++) {
+        if (groups[i].scans.some((x) => groups[j].scans.some((y) => sameClan(x, y)))) { groups[i].scans.push(...groups[j].scans); groups.splice(j, 1); j = i; }
+      }
+    }
+    return groups.map((g) => ({ ...g, key: `c${Math.min(...g.scans.map((x) => x.id))}` }));
+  }
+
   function statOf(list, key, mode) {
     const v = list.map((x) => Number(x[key])).filter((n) => Number.isFinite(n) && n > 0).sort((a, b) => b - a);
     if (!v.length) return null;
@@ -6037,17 +6077,19 @@
     // Clãs: a leitura mais recente de cada um vale para as comparações
     const playersBy = {};
     data.players.forEach((x) => { (playersBy[x.scan_id] ||= []).push(x); });
-    const clanMap = new Map();
-    data.scans.forEach((sc) => {
-      const k = norm(sc.clan_name);
-      if (!clanMap.has(k)) clanMap.set(k, { key: k, scans: [] });
-      clanMap.get(k).scans.push(sc);
-    });
-    const clans = [...clanMap.values()].map((c) => {
+    const clans = groupClans(data.scans).map((c) => {
       c.scans.sort((a, b) => a.scanned_on.localeCompare(b.scanned_on) || a.id - b.id);
       c.last = c.scans[c.scans.length - 1];
-      c.name = c.last.clan_name;
+      // Nome: o que mais aparece nas leituras (um erro de leitura isolado não troca o nome); no empate fica o primeiro
+      const freq = {};
+      c.scans.forEach((x) => { freq[x.clan_name] = (freq[x.clan_name] || 0) + 1; });
+      c.name = c.scans.reduce((best, x) => (freq[x.clan_name] > freq[best] ? x.clan_name : best), c.scans[0].clan_name);
+      const nfreq = {};
+      c.scans.forEach((x) => { if (x.clan_number != null) nfreq[x.clan_number] = (nfreq[x.clan_number] || 0) + 1; });
+      c.number = c.scans.reduce((best, x) => (x.clan_number != null && (best == null || nfreq[x.clan_number] > nfreq[best]) ? x.clan_number : best), null);
       c.players = playersBy[c.last.id] || [];
+      c.names = new Set(c.scans.map((x) => norm(x.clan_name)));
+      c.ids = new Set(c.scans.map((x) => x.id));
       return c;
     });
     const us = { key: '__us', name: 'INFERNUM', us: true, players: activeMembers() };
@@ -6061,7 +6103,7 @@
     const ourStat = Object.fromEntries(ATTRS.map((a) => [a.key, statOf(us.players, a.key, statK)]));
     const best = Object.fromEntries(ATTRS.map((a) => [a.key, Math.max(...rowsAll.map((r) => statOf(r.players, a.key, statK) || 0))]));
     const cmpTable = `<div class="table-scroll"><table class="mini-table rv-cmp"><thead><tr><th>Clã</th><th>Jog.</th>${ATTRS.map((a) => `<th title="${esc(a.label)}">${a.short}</th>`).join('')}<th>Leitura</th></tr></thead><tbody>
-      ${rowsAll.map((r) => `<tr class="${r.us ? 'rv-us' : ''}"><td>${r.us ? '<b>🔥 INFERNUM</b>' : `<a href="#" data-rv-clan="${esc(r.key)}">${esc(r.name)}</a>`}</td><td>${r.players.length}</td>
+      ${rowsAll.map((r) => `<tr class="${r.us ? 'rv-us' : ''}"><td>${r.us ? '<b>🔥 INFERNUM</b>' : `<a href="#" data-rv-clan="${esc(r.key)}">${esc(r.name)}</a>${clans.filter((x) => norm(x.name) === norm(r.name)).length > 1 && r.number ? ` <small class="muted">nº ${r.number}</small>` : ''}`}</td><td>${r.players.length}</td>
         ${ATTRS.map((a) => {
           const v = statOf(r.players, a.key, statK);
           const d = !r.us && v != null && ourStat[a.key] ? (v - ourStat[a.key]) / ourStat[a.key] : null;
@@ -6099,15 +6141,16 @@
       }).join('')}<td>${can('rivals_import') ? `<button class="btn small ghost" data-rv-del="${sc.id}" title="Apagar esta leitura">🗑</button>` : ''}</td></tr>`;
     }).join('');
     const whenTxt = (iso) => new Date(iso).toLocaleString('pt-BR', { day: '2-digit', month: '2-digit', year: '2-digit', hour: '2-digit', minute: '2-digit' });
-    const clanLog = (data.log || []).filter((l) => norm(l.clan_name) === sel.key).slice(0, 20);
+    const clanLog = (data.log || []).filter((l) => sel.ids.has(l.scan_id) || sel.names.has(norm(l.clan_name))).slice(0, 20);
     const logHtml = clanLog.length ? `<ul class="plain-list small rv-log">${clanLog.map((l) => `<li>${l.action === 'delete' ? '🗑' : '📥'} <b>${esc(l.actor_name || 'Desconhecido')}</b> <span class="muted">(${esc(l.actor_clan)})</span>
       ${l.action === 'delete' ? '<span class="c-no">apagou</span>' : 'importou'} a leitura de ${l.scanned_on ? dmyS(l.scanned_on) : '—'}${l.players != null ? ` (${l.players} jogadores)` : ''}
       <span class="muted">· ${whenTxt(l.created_at)}</span></li>`).join('')}</ul>`
       : '<div class="muted small">Nenhum registro ainda.</div>';
     const detail = `
-      <div class="evo-tabs" role="tablist">${clans.map((c) => `<button type="button" class="evo-tab" role="tab" data-rv-clan="${esc(c.key)}" aria-selected="${c.key === sel.key}">${esc(c.name)}</button>`).join('')}</div>
+      ${clans.length >= 8 ? `<input type="search" id="rv-clan-q" class="rv-clan-q" placeholder="Buscar clã (${clans.length} mapeados)…" value="${esc(RIV.clanQ || '')}" autocomplete="off">` : ''}
+      <div class="evo-tabs" role="tablist" id="rv-clan-tabs">${clans.slice().sort((a, b) => a.name.localeCompare(b.name, 'pt-BR')).map((c) => `<button type="button" class="evo-tab" role="tab" data-rv-clan="${esc(c.key)}" data-rv-names="${esc([...c.names].join(' '))}" aria-selected="${c.key === sel.key}">${esc(c.name)}${clans.filter((x) => norm(x.name) === norm(c.name)).length > 1 && c.number ? ` <small>· nº ${c.number}</small>` : ''}</button>`).join('')}</div>
       <div class="kpi-grid">
-        ${kpi('👥', 'Jogadores', sel.players.length, `Nº ${sel.last.clan_number ?? '—'}`)}
+        ${kpi('👥', 'Jogadores', sel.players.length, `Nº ${sel.number ?? '—'}`)}
         ${kpi('💠', 'Ressonância média', fmt0(statOf(sel.players, 'resonance', 'avg')), `INFERNUM: ${fmt0(statOf(us.players, 'resonance', 'avg'))}`)}
         ${kpi('🏅', 'Ressonância Top 10', fmt0(statOf(sel.players, 'resonance', 'top10')), `INFERNUM: ${fmt0(statOf(us.players, 'resonance', 'top10'))}`)}
         ${kpi('📅', 'Última leitura', dmyS(sel.last.scanned_on), `${sel.scans.length} leitura${sel.scans.length > 1 ? 's' : ''}`)}
@@ -6165,6 +6208,12 @@
     };
     search();
     $('#rv-q').addEventListener('input', (e) => { RIV.q = e.target.value; search(); });
+    const filterClans = () => {
+      const q = norm(RIV.clanQ || '');
+      main.querySelectorAll('#rv-clan-tabs .evo-tab').forEach((b) => { b.hidden = !!q && !b.dataset.rvNames.includes(q) && b.getAttribute('aria-selected') !== 'true'; });
+    };
+    $('#rv-clan-q')?.addEventListener('input', (e) => { RIV.clanQ = e.target.value; filterClans(); });
+    filterClans();
     $('#rv-stat').addEventListener('change', (e) => { RIV.stat = e.target.value; viewRivals(true); });
     main.querySelectorAll('[data-rv-clan]').forEach((b) => b.addEventListener('click', (e) => {
       e.preventDefault(); RIV.clan = b.dataset.rvClan;

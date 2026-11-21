@@ -1092,3 +1092,4 @@ body.has-fab main { padding-bottom: 90px; }
 .sc-clan .sc-top { display: flex; align-items: center; gap: 10px; }
 .sc-clan .sc-top input[type="checkbox"] { width: 20px; height: 20px; flex: none; margin: 0; }
 .sc-clan .sc-top input[type="text"] { flex: 1; min-width: 0; }
+.rv-clan-q { width: 100%; margin: 0 0 8px; }
