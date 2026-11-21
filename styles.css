@@ -546,6 +546,8 @@ h1 { background: linear-gradient(180deg, #fff1da, #e3b878); -webkit-background-c
 .ev-date small, .ev-title small { display: block; color: var(--muted); font-weight: 400; font-size: .75rem; }
 .ev-title { font-weight: 500; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .cmp-legend { display: flex; gap: 14px; color: var(--muted); margin: -4px 0 8px; }
+.cmp-scope { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 16px; margin-top: 12px; }
+.cmp-scope .radio { margin: 0; }
 .lg { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 5px; vertical-align: -1px; }
 .lg.me, .cmp-track .me { background: linear-gradient(90deg, var(--accent), var(--ember)); }
 .lg.clan, .cmp-track .clan { background: #6b5a4c; }

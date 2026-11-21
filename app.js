@@ -236,6 +236,11 @@
         const log = await sb.from('rival_scan_log').select('*').order('created_at', { ascending: false }).limit(300);
         return { scans: s.data, players, log: log.error ? [] : log.data };
       },
+      // Atributos dos rivais (leitura mais recente de cada clã), sem nomes, para o perfil
+      async serverPool() {
+        const r = await sb.rpc('rival_server_pool');
+        return r.error ? null : r.data; // null = SQL ainda não rodado
+      },
       async importRivalScan(o) {
         const r = await sb.rpc('import_rival_scan', { p_clan_name: o.clan_name, p_clan_number: o.clan_number ?? null,
           p_scanned_on: o.scanned_on, p_source: o.source || null, p_players: o.players });
@@ -995,6 +1000,13 @@
         if (!isOfficer()) return { scans: [], players: [] };
         return { scans: db.rivalScans.map((x) => ({ ...x })), players: db.rivalPlayers.map((x) => ({ ...x })),
           log: db.rivalLog.slice().sort((a, b) => b.created_at.localeCompare(a.created_at)).map((x) => ({ ...x })) };
+      },
+      async serverPool() {
+        const us = { clan_name: 'INFERNUM', clan_number: null };
+        const last = groupClans(db.rivalScans.filter((s) => !sameClan(s, us)))
+          .map((g) => g.scans.reduce((b, s) => (s.scanned_on > b.scanned_on || (s.scanned_on === b.scanned_on && s.id > b.id) ? s : b)).id);
+        return db.rivalPlayers.filter((p) => last.includes(p.scan_id))
+          .map((p) => ({ scan_id: p.scan_id, ...pick(p, ATTRS.map((a) => a.key)) }));
       },
       async importRivalScan(o) {
         if (!isOfficer()) throw new Error('Só oficiais e o líder importam clãs rivais');
@@ -4462,7 +4474,8 @@
 
   // ---------- Painel individual do membro (menu "Meu perfil") ----------
 
-  const P = { days: 90 };
+  const P = { days: 90, scope: 'clan' };
+  let SERVER_POOL = null; // atributos dos rivais para o "Servidor" do perfil (carrega na primeira vez)
 
   // Sem userId = o próprio perfil. Oficiais e líder podem abrir o perfil de qualquer membro.
   async function viewMyPanel(userId) {
@@ -4521,10 +4534,11 @@
         <span class="${cls} small">${label}</span></a>`;
     }).join('');
 
-    // Meus atributos comparados com a média do clã
+    // Meus atributos comparados com a média do clã ou do servidor (clã + leitura mais recente de cada rival)
     const clan = activeMembers().filter(hasBuild);
-    const cmpRows = (group, groupLabel) => ATTRS.map((a) => {
-      const vals = group.map((m) => m[a.key]);
+    if (P.scope === 'server' && hasBuild(me) && !SERVER_POOL) SERVER_POOL = await api.serverPool().catch(() => null);
+    const cmpRows = (group, groupLabel, short) => ATTRS.map((a) => {
+      const vals = group.map((m) => m[a.key]).filter((v) => v != null && Number.isFinite(Number(v))).map(Number);
       const mean = vals.length ? Math.round(vals.reduce((s, v) => s + v, 0) / vals.length) : null;
       const mineVal = me[a.key];
       const scale = Math.max(mineVal, mean || 0) * 1.1 || 1;
@@ -4535,21 +4549,45 @@
           <span class="me" style="width:${(100 * mineVal) / scale}%"></span>
           <span class="clan" style="width:${(100 * (mean || 0)) / scale}%"></span>
         </div>
-        <span class="cmp-val"><b>${fmtNum(mineVal)}</b><small>${groupLabel === 'Média do clã' ? 'clã' : 'faixa'} ${fmtNum(mean)}</small></span>
+        <span class="cmp-val"><b>${fmtNum(mineVal)}</b><small>${short} ${fmtNum(mean)}</small></span>
         <span class="cmp-diff ${diff >= 0 ? 'c-yes' : 'c-no'}">${diff >= 0 ? '+' : ''}${Math.round(diff * 100)}%</span>
       </div>`;
     }).join('');
     const noBuild = `<p class="muted">${self ? 'Informe sua classe e seus atributos em “Editar perfil” para comparar com o clã.' : 'Este membro ainda não informou classe e atributos.'}</p>`;
-    const cmp = hasBuild(me) ? cmpRows(clan, 'Média do clã') : noBuild;
     // Mesma faixa de Ressonância (±500)
     const BAND = 500;
     const bandLo = Math.max(0, (me.resonance || 0) - BAND);
     const bandHi = (me.resonance || 0) + BAND;
-    const band = hasBuild(me) ? clan.filter((m) => m.id !== me.id && m.resonance >= bandLo && m.resonance <= bandHi)
-      .sort((a, b) => Math.abs(a.resonance - me.resonance) - Math.abs(b.resonance - me.resonance)) : [];
-    const bandHtml = !hasBuild(me) ? noBuild
-      : !band.length ? `<p class="muted">Nenhum outro membro com Ressonância entre ${fmtNum(bandLo)} e ${fmtNum(bandHi)}.</p>`
-        : cmpRows(band, 'Média da faixa');
+    const youH = self ? 'Você' : esc(who);
+    const cmpCards = () => {
+      const pool = P.scope === 'server' && Array.isArray(SERVER_POOL) ? SERVER_POOL : null;
+      const group = pool ? [...clan, ...pool] : clan;
+      const word = pool ? 'servidor' : 'clã';
+      const unit = (n) => (pool ? (n === 1 ? 'jogador' : 'jogadores') : (n === 1 ? 'membro' : 'membros'));
+      const nRiv = pool ? new Set(pool.map((x) => x.scan_id)).size : 0;
+      const band = hasBuild(me) ? group.filter((m) => m.id !== me.id && m.resonance != null && m.resonance >= bandLo && m.resonance <= bandHi) : [];
+      const bandHtml = !hasBuild(me) ? noBuild
+        : !band.length ? `<p class="muted">Nenhum outro ${pool ? 'jogador' : 'membro'} com Ressonância entre ${fmtNum(bandLo)} e ${fmtNum(bandHi)}.</p>`
+          : cmpRows(band, 'Média da faixa', 'faixa');
+      return `<div class="card" id="pf-cmp-avg">
+          <h2>${youH} × média do ${word}</h2>
+          <div class="cmp-legend small"><span><i class="lg me"></i>${youH}</span><span><i class="lg clan"></i>Média de ${fmtNum(group.length)} ${unit(group.length)}${pool ? ` (INFERNUM + ${nRiv} ${nRiv === 1 ? 'clã rival' : 'clãs rivais'})` : ''}</span></div>
+          ${hasBuild(me) ? cmpRows(group, `Média do ${word}`, word) : noBuild}
+        </div>
+        <div class="card" id="pf-cmp-band">
+          <h2>${youH} × mesma faixa${pool ? ' do servidor' : ''}</h2>
+          <div class="cmp-legend small"><span><i class="lg me"></i>${youH}</span><span><i class="lg clan"></i>${hasBuild(me) ? `Média de ${fmtNum(band.length)} ${unit(band.length)} com Ressonância ${fmtNum(bandLo)}–${fmtNum(bandHi)}` : 'Mesma faixa de Ressonância (±500)'}</span></div>
+          ${bandHtml}
+        </div>`;
+    };
+    const scopeMsg = () => (P.scope !== 'server' ? ''
+      : SERVER_POOL == null ? 'A comparação com o servidor ainda não está ativa no banco.'
+        : !SERVER_POOL.length ? 'Nenhum clã rival mapeado ainda: só o INFERNUM entra na conta.' : 'Médias sem nomes: INFERNUM + a leitura mais recente de cada clã rival.');
+    const scopeHtml = hasBuild(me) ? `<div class="cmp-scope" role="radiogroup" aria-label="Comparar os atributos com">
+        <span class="muted small">Comparar os atributos com:</span>
+        ${[['clan', 'Clã'], ['server', 'Servidor']].map(([v, l]) => `<label class="radio"><input type="radio" name="pf-scope" value="${v}" ${P.scope === v ? 'checked' : ''}> ${l}</label>`).join('')}
+        <span class="muted small" id="pf-scope-msg">${scopeMsg()}</span>
+      </div>` : '';
 
     main.innerHTML = `
       ${self ? '' : '<p><a href="#/membros" class="small">← Membros</a></p>'}
@@ -4583,17 +4621,9 @@
       ${powerRankCard(me, self)}
       ${evoCard()}
 
+      ${scopeHtml}
       <div class="panels">
-        <div class="card">
-          <h2>${self ? 'Você' : esc(who)} × média do clã</h2>
-          <div class="cmp-legend small"><span><i class="lg me"></i>${self ? 'Você' : esc(who)}</span><span><i class="lg clan"></i>Média de ${clan.length} membros</span></div>
-          ${cmp}
-        </div>
-        <div class="card">
-          <h2>${self ? 'Você' : esc(who)} × mesma faixa</h2>
-          <div class="cmp-legend small"><span><i class="lg me"></i>${self ? 'Você' : esc(who)}</span><span><i class="lg clan"></i>${hasBuild(me) ? `Média de ${band.length} ${band.length === 1 ? 'membro' : 'membros'} com Ressonância ${fmtNum(bandLo)}–${fmtNum(bandHi)}` : 'Mesma faixa de Ressonância (±500)'}</span></div>
-          ${bandHtml}
-        </div>
+        ${cmpCards()}
         <div class="card">
           <h2>Próximos eventos ${pending ? `<span class="badge warn">${pending} sem resposta</span>` : ''}</h2>
           ${upRows || '<p class="muted">Nenhum evento agendado.</p>'}
@@ -4634,6 +4664,21 @@
     bindAbsences(me, absences || [], () => viewMyPanel(userId));
     bindLeave(me, () => viewMyPanel(userId));
     $('#p-days').addEventListener('change', (e) => { P.days = Number(e.target.value); viewMyPanel(userId); });
+    // Clã / Servidor: troca só os dois quadros de comparação
+    main.querySelectorAll('[name="pf-scope"]').forEach((r) => r.addEventListener('change', async () => {
+      P.scope = r.value;
+      const msg = $('#pf-scope-msg');
+      if (P.scope === 'server' && !SERVER_POOL) {
+        msg.textContent = 'Carregando…';
+        SERVER_POOL = await api.serverPool().catch(() => null);
+        if (P.scope !== 'server' || !document.body.contains(msg)) return;
+      }
+      msg.textContent = scopeMsg();
+      const tmp = document.createElement('div');
+      tmp.innerHTML = cmpCards();
+      $('#pf-cmp-avg').replaceWith(tmp.children[0]);
+      $('#pf-cmp-band').replaceWith(tmp.children[0]);
+    }));
 
     // Anotações internas
     $('#note-form')?.addEventListener('submit', async (e) => {
@@ -6059,7 +6104,7 @@
 
   async function viewRivals(keepScroll) {
     if (!can('rivals_view')) { location.hash = '#/'; return; }
-    if (!keepScroll || !RIV_DATA) { loading(); RIV_DATA = await api.rivals().catch(() => null); }
+    if (!keepScroll || !RIV_DATA) { loading(); RIV_DATA = await api.rivals().catch(() => null); SERVER_POOL = null; }
     const y = keepScroll ? scrollY : 0;
     const data = RIV_DATA;
     const head = `<div class="page-head"><h1>Clãs rivais</h1>
