@@ -1240,3 +1240,8 @@ body.has-fab main { padding-bottom: 90px; }
   .ms-cell:has(select + select) > .radio { flex-basis: 100%; }
   .ms-cell:has(select + select) > select { flex: 1 1 0; min-width: 0; }
 }
+/* Celular: botões do perfil centralizados, todos da mesma largura */
+@media (max-width: 560px) {
+  .me-card .row.me-actions { flex-basis: 100%; align-items: center; }
+  .me-card .row.me-actions > .btn { width: 100%; max-width: 280px; justify-content: center; }
+}
