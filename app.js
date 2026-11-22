@@ -5502,25 +5502,28 @@
       </div>`;
     }).join('');
 
-    // Contas que eu piloto (só no meu próprio perfil)
-    const mine = self ? state.pilots.filter((p) => p.pilot_id === me) : [];
+    // Contas que esta pessoa pilota (no meu perfil também os pedidos; no dos outros, só a liderança vê os pedidos)
+    const mine = state.pilots.filter((p) => p.pilot_id === account.id && (self || p.status === 'approved' || isOfficer()));
     const mineRows = mine.map((p) => {
       const acc = memberById(p.account_id);
       if (!acc) return '';
-      const status = p.status === 'pending' ? '⏳ aguardando o dono da conta (ou um oficial) aprovar'
+      const status = p.status === 'pending' ? (self ? '⏳ aguardando o dono da conta (ou um oficial) aprovar' : '⏳ pedido aguardando aprovação')
         : acc.role === 'pending' ? '⏳ conta aguardando aprovação do clã'
           : acc.role === 'former' ? 'conta fora do clã' : `✔ ${acc.managed ? 'conta sem login' : 'conta com dono'}`;
       return `<div class="pilot-row">
         ${avatar(acc)}
         <div class="spacer"><a class="member-link" href="#/membro/${encodeURIComponent(acc.id)}">${esc(displayName(acc))}</a>
           ${acc.char_class ? classTag(acc.char_class) : ''}<div class="muted small">${status}</div></div>
-        <button class="btn small ghost danger" data-pilot-leave="${esc(acc.id)}">${p.status === 'pending' ? 'Cancelar pedido' : 'Parar de pilotar'}</button>
+        ${self ? `<button class="btn small ghost danger" data-pilot-leave="${esc(acc.id)}">${p.status === 'pending' ? 'Cancelar pedido' : 'Parar de pilotar'}</button>` : ''}
       </div>`;
     }).join('');
 
-    if (!self && !rowsFor.length && !isOfficer()) return '';
+    if (!self && !rowsFor.length && !mine.length && !isOfficer()) return '';
     return `<div class="card pilots-card">
-      <h2>🧑‍✈️ ${self ? 'Contas pilotadas' : 'Pilotos desta conta'}${account.managed ? ' <span class="muted small">· conta sem login</span>' : ''}</h2>
+      <h2>🧑‍✈️ ${self || mine.length ? 'Contas pilotadas' : 'Pilotos desta conta'}${account.managed ? ' <span class="muted small">· conta sem login</span>' : ''}</h2>
+      ${!self && mine.length ? `<h3 class="pilot-sub">Contas que ${esc(displayName(account))} pilota</h3>
+        ${mineRows}
+        <h3 class="pilot-sub">Quem pode pilotar esta conta</h3>` : ''}
       ${self ? `<p class="muted small" style="margin:0 0 8px">Jogue com mais de uma conta: depois de aprovada, escolha a conta no topo do site em <b>“Respondendo como”</b>.</p>
         <div class="row" style="margin-bottom:10px">
           <button class="btn small primary" id="btn-new-piloted">+ Cadastrar conta sem login</button>
