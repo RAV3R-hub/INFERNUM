@@ -161,6 +161,9 @@ Depois de aprovado, aparece no topo o seletor **"Respondendo como"**: o piloto e
 - No painel de times aparece um alerta quando a mesma pessoa controla 2 ou mais contas confirmadas no mesmo evento.
 - O dono pode remover pilotos a qualquer momento; oficiais e líder também, e ainda podem adicionar pilotos direto no perfil da conta.
 - Ao remover do clã alguém que é o único piloto de contas sem login, o site oferece remover essas contas junto.
+- **Só piloto:** quem se cadastrou apenas para responder pelas contas que pilota. Oficiais (com a permissão "Gerenciar pilotos de contas") e o líder marcam no **✎ Editar** da lista de membros.
+  Não conta como membro: fica fora do rank de força, da frequência, das contagens e das listas dos eventos, e aparece na seção recolhida **Só pilotos** da página Membros.
+  Não responde com a própria conta (em "Respondendo como" aparecem só as contas que pilota) e não pode ser pilotado. Precisa do [`supabase/so_piloto.sql`](supabase/so_piloto.sql).
 
 **📰 Malah News** (menu do topo): o jornal do clã, com imagens publicadas por oficiais e líder.
 Todos os membros veem as edições, da mais nova para a mais antiga; clicando na imagem, ela abre no tamanho original.

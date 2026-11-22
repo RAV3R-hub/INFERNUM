@@ -122,6 +122,7 @@
     id: p.id, discord_name: p.discord_name, game_name: p.game_name, role: p.role, managed: !!p.managed,
     char_class: p.char_class, armor: p.armor, armor_pen: p.armor_pen, potency: p.potency, resistance: p.resistance, resonance: p.resonance,
     avatar_url: p.avatar_hidden ? null : p.avatar_url, custom_avatar_url: p.avatar_hidden ? null : p.custom_avatar_url, avatar_hidden: !!p.avatar_hidden,
+    pilot_only: !!p.pilot_only,
   });
 
   function supabaseApi() {
@@ -317,6 +318,7 @@
       async removeMember(userId, reason, withManaged) { ok(await sb.rpc('remove_member', { target: userId, reason: reason || '', with_managed: !!withManaged })); },
       async renameMember(userId, name) { ok(await sb.rpc('set_member_name', { p_user: userId, p_name: name })); },
       async setAlias(userId, alias) { ok(await sb.rpc('set_member_alias', { p_user: userId, p_alias: alias })); },
+      async setPilotOnly(userId, value) { ok(await sb.rpc('set_pilot_only', { p_user: userId, p_value: !!value })); },
       // Só o líder: altera classe e atributos de outra conta (o dono recebe um aviso)
       async leaderSetBuild(userId, b) {
         ok(await sb.rpc('leader_set_build', { p_user: userId, p_char_class: b.char_class, p_armor: b.armor, p_armor_pen: b.armor_pen,
@@ -481,6 +483,8 @@
         { id: 'f3', discord_name: 'sussurro_br', game_name: 'Sussurro', role: 'former', created_at: longAgo, ...randomBuild() },
         // Conta sem login, pilotada pelo usuário da demonstração
         { id: 'm1', discord_name: '', game_name: 'Ceifador', role: 'member', managed: true, created_at: day(-30, 20), ...randomBuild() },
+        // Cadastro só piloto: existe apenas para responder pela conta do Brasa
+        { id: 'pl1', discord_name: 'navegante_br', game_name: 'Navegante', role: 'member', pilot_only: true, created_at: day(-12, 20) },
       ],
       contacts: [{ user_id: 'u1', phone: '(11) 98765-4321' }, { user_id: 'u3', phone: '(21) 99876-5432' }],
       events: [
@@ -572,6 +576,7 @@
       { account_id: 'm1', pilot_id: 'u0', status: 'approved', reason: null, requested_at: day(-30, 20), decided_at: day(-30, 20), decided_by: 'u0' },
       { account_id: 'u12', pilot_id: 'u0', status: 'approved', reason: 'Jogo na conta dele nas Guerras', requested_at: day(-15, 20), decided_at: day(-15, 21), decided_by: 'u12' },
       { account_id: 'u0', pilot_id: 'u8', status: 'pending', reason: 'Posso jogar na sua conta quando você viajar', requested_at: day(-1, 18), decided_at: null, decided_by: null },
+      { account_id: 'u11', pilot_id: 'pl1', status: 'approved', reason: null, requested_at: day(-12, 20), decided_at: day(-12, 21), decided_by: 'u11' },
     ];
     answer(1, 'm1', true);
     db.profiles.slice(1, 31).forEach((p, i) => answer(1, p.id, i % 7 !== 3));
@@ -834,8 +839,14 @@
     }
     // Ausência: eventos futuros do período viram "Não vou" (igual à função apply_absence do banco)
     const absenceCovers = (a, ev) => { const d = localDay(new Date(ev.starts_at)); return d >= a.starts_on && d <= a.ends_on; };
+    function dropOwnFuture(uid) {
+      const future = (r) => r.user_id === uid && Date.parse(db.events.find((e) => e.id === r.event_id)?.starts_at || 0) > Date.now();
+      db.rsvps.filter(future).forEach((r) => dropSlot(r.event_id, uid));
+      db.rsvps = db.rsvps.filter((r) => !future(r));
+    }
     function applyAbsenceDemo(a, events = db.events) {
       let n = 0;
+      if (profile(a.user_id)?.pilot_only) return 0; // igual ao banco: só piloto não tem resposta própria
       events.filter((e) => Date.parse(e.starts_at) > Date.now() && absenceCovers(a, e)).forEach((e) => {
         const r = db.rsvps.find((x) => x.event_id === e.id && x.user_id === a.user_id);
         if (!r) { db.rsvps.push({ event_id: e.id, user_id: a.user_id, going: false, absence_id: a.id }); n++; }
@@ -850,7 +861,7 @@
     function applyAutoDemo(uid, events = db.events, isNew = false) {
       const s = db.memberSettings[uid];
       const p = profile(uid);
-      if (!s || !(s.auto_war || s.auto_vigil || s.auto_rite) || !p || !ACTIVE_ROLES.includes(p.role)) return 0;
+      if (!s || !(s.auto_war || s.auto_vigil || s.auto_rite) || !p || !ACTIVE_ROLES.includes(p.role) || p.pilot_only) return 0;
       // Resposta do Discord para o tipo do evento, ou null quando a conta não quer confirmar esse tipo
       const dcFor = (e) => {
         const t = norm(db.types.find((x) => x.id === e.type_id)?.name);
@@ -905,7 +916,7 @@
       async findAccounts(q) {
         const s = String(q || '').trim().toLowerCase();
         if (!isMember() || s.length < 3) return [];
-        return db.profiles.filter((p) => ['member', 'officer', 'leader'].includes(p.role) && p.id !== state.user.id
+        return db.profiles.filter((p) => ['member', 'officer', 'leader'].includes(p.role) && p.id !== state.user.id && !p.pilot_only
           && (norm(displayName(p)).includes(norm(s)) || norm(p.alias).includes(norm(s))))
           .sort(byName).slice(0, 8).map((p) => ({ id: p.id, game_name: displayName(p), char_class: p.char_class }));
       },
@@ -914,7 +925,12 @@
       async syncDiscord() { /* no modo demonstração não há Discord */ },
       async eventTypes() { return db.types.filter((t) => t.active).sort((a, b) => a.sort_order - b.sort_order).map((t) => ({ ...t })); },
       // Só na demonstração: permite ver o site como líder, oficial ou membro comum
-      async demoSetRole(role) { profile(state.user.id).role = role; },
+      async demoSetRole(role) {
+        const p = profile(state.user.id);
+        p.role = role === 'pilot' ? 'member' : role;
+        p.pilot_only = role === 'pilot';
+        if (p.pilot_only) dropOwnFuture(p.id);
+      },
       async profileHistory() { return db.history.filter((h) => isOfficer() || canActAsDemo(h.user_id)).map((h) => ({ ...h })); },
       async saveProfile(fields, phone) {
         // Mesmo comportamento do gatilho do banco: registra o que mudou
@@ -1167,6 +1183,7 @@
       },
       async requestPilotAccess(accountId, reason) {
         if (accountId === state.user.id) throw new Error('Esta já é a sua conta');
+        if (profile(accountId)?.pilot_only) throw new Error('Esta pessoa está cadastrada só como piloto (não tem conta própria no jogo para ser pilotada)');
         if (db.pilots.some((p) => p.account_id === accountId && p.pilot_id === state.user.id && p.status === 'approved')) throw new Error('Você já pilota esta conta');
         db.pilots = db.pilots.filter((p) => !(p.account_id === accountId && p.pilot_id === state.user.id));
         db.pilots.push({ account_id: accountId, pilot_id: state.user.id, status: 'pending', reason: reason || null, requested_at: new Date().toISOString(), decided_at: null, decided_by: null });
@@ -1184,6 +1201,7 @@
       },
       async addPilot(accountId, pilotId) {
         if (!isOfficer()) throw new Error('Só oficiais e o líder podem adicionar pilotos');
+        if (profile(accountId)?.pilot_only) throw new Error('Esta pessoa está cadastrada só como piloto (não tem conta própria no jogo para ser pilotada)');
         db.pilots = db.pilots.filter((p) => !(p.account_id === accountId && p.pilot_id === pilotId));
         db.pilots.push({ account_id: accountId, pilot_id: pilotId, status: 'approved', reason: null, requested_at: new Date().toISOString(), decided_at: new Date().toISOString(), decided_by: state.user.id });
       },
@@ -1220,6 +1238,7 @@
       async setRsvp(eventId, going, build, accountId) {
         const acct = accountId || state.user.id;
         if (!canActAsDemo(acct)) throw new Error('Você não pode responder por esta conta');
+        if (profile(acct)?.pilot_only) throw new Error('Você está cadastrado só como piloto: escolha a conta que você pilota em “Respondendo como”');
         let r = db.rsvps.find((x) => x.event_id === eventId && x.user_id === acct);
         if (!r) { r = { event_id: eventId, user_id: acct }; db.rsvps.push(r); }
         Object.assign(r, { going, answered_by: state.user.id, auto: false }, build || {});
@@ -1276,6 +1295,21 @@
         if (me === 'officer' && userId !== state.user.id && !['pending', 'member', 'former'].includes(p.role)) throw new Error('Só o líder pode editar o codinome de oficiais e do líder');
         if ((p.alias || null) !== v) db.history.push({ id: db.history.length + 1, user_id: p.id, changed_by: state.user.id, changed_at: new Date().toISOString(), changes: { alias: [p.alias || null, v] } });
         p.alias = v;
+      },
+      // Só piloto (oficiais e líder): igual a set_pilot_only do banco
+      async setPilotOnly(userId, value) {
+        const p = profile(userId);
+        const me = profile(state.user.id).role;
+        const v = !!value;
+        if (me !== 'leader' && me !== 'officer') throw new Error('Só oficiais e o líder podem marcar quem é só piloto');
+        if (!p) throw new Error('Membro não encontrado');
+        if (userId === state.user.id) throw new Error('Peça a outro oficial ou ao líder para alterar o seu cadastro');
+        if (p.managed) throw new Error('Conta sem login é uma conta do jogo: não pode ser só piloto');
+        if (me === 'officer' && !['pending', 'member'].includes(p.role)) throw new Error('Só o líder pode alterar o cadastro de oficiais e do líder');
+        if (!!p.pilot_only === v) return;
+        p.pilot_only = v;
+        if (v) { dropOwnFuture(p.id); db.pilots = db.pilots.filter((x) => x.account_id !== p.id); }
+        db.history.push({ id: db.history.length + 1, user_id: p.id, changed_by: state.user.id, changed_at: new Date().toISOString(), changes: { pilot_only: [!v, v] } });
       },
       async removeMember(userId, reason, withManaged) {
         const p = profile(userId);
@@ -1728,7 +1762,11 @@
 
   const isMember = () => ['member', 'officer', 'leader'].includes(state.me?.role);
   const isOfficer = () => ['officer', 'leader'].includes(state.me?.role);
-  const activeMembers = () => state.members.filter((m) => ACTIVE_ROLES.includes(m.role));
+  // Quem é "só piloto" não conta como membro: fica fora do rank de força, da frequência, das contagens e das listas dos eventos
+  const activeMembers = () => state.members.filter((m) => ACTIVE_ROLES.includes(m.role) && !m.pilot_only);
+  // Todos os ativos, inclusive quem é só piloto (para escolher pilotos de uma conta)
+  const activePeople = () => state.members.filter((m) => ACTIVE_ROLES.includes(m.role));
+  const DEMO_ROLE_LABEL = (r) => (r === 'pilot' ? 'Só piloto' : ROLE_LABEL[r]);
 
   // ---------- Contas pilotadas ----------
   // state.pilots = vínculos (conta ↔ piloto) que eu posso ver; state.acting = conta que está respondendo agora
@@ -1738,11 +1776,18 @@
   const canActAs = (id) => id === state.user?.id || pilotedByMe().includes(id);
   // Contas pelas quais posso responder agora: a minha + as contas pilotadas que estão ativas no clã
   const myAccounts = () => [state.me, ...pilotedByMe().map(memberById).filter((m) => m && ACTIVE_ROLES.includes(m.role))].filter(Boolean);
-  const actingId = () => (state.acting && myAccounts().some((a) => a.id === state.acting) ? state.acting : state.user?.id);
+  // Contas pelas quais respondo aos eventos: quem é só piloto responde apenas pelas contas que pilota
+  const answerAccounts = () => myAccounts().filter((a) => !(a.id === state.user?.id && state.me?.pilot_only));
+  const actingId = () => { const accs = answerAccounts(); return accs.some((a) => a.id === state.acting) ? state.acting : (accs[0]?.id || state.user?.id); };
+  const pilotOnlyMe = () => !!state.me?.pilot_only && actingId() === state.user?.id;
   const actingProfile = () => memberById(actingId()) || state.me;
   // Quem controla cada conta: o dono (se tiver login) e os pilotos aprovados
   const controllersOf = (m) => [...(m && !m.managed ? [m.id] : []), ...approvedPilotIds(m?.id)];
   function pilotLabel(m) {
+    if (m?.pilot_only) {
+      const accs = (state.pilots || []).filter((p) => p.pilot_id === m.id && p.status === 'approved').map((p) => displayName(memberById(p.account_id))).filter(Boolean);
+      return `<span class="pilot-tag" title="Cadastro só para responder pelas contas que pilota: não conta como membro">🧑‍✈️ só piloto${accs.length ? ` · pilota ${esc(accs.join(', '))}` : ''}</span>`;
+    }
     const names = approvedPilotIds(m.id).map((id) => displayName(memberById(id))).filter(Boolean);
     if (!names.length) return m.managed ? '<span class="pilot-tag warn" title="Esta conta não tem piloto">🧑‍✈️ sem piloto</span>' : '';
     return `<span class="pilot-tag" title="Pode ser respondida por: ${esc(names.join(', '))}">🧑‍✈️ pilotada por ${esc(names.join(', '))}</span>`;
@@ -1858,12 +1903,16 @@
   // Só o líder altera classe e atributos de outras contas (o dono da conta é avisado)
   const canLeaderBuild = (m) => isLeader() && !!m && m.id !== state.user.id && m.role !== 'former';
   // Um só botão "✎ Editar" (perfil e lista de membros): nick, codinome e, só para o líder, classe e atributos
-  const canEditMember = (m) => canRename(m) || canAlias(m) || canLeaderBuild(m);
+  // Só piloto: oficiais (permissão "Gerenciar pilotos") para membros e quem aguarda aprovação; o líder para todos (menos ele mesmo)
+  const canPilotOnly = (m) => !!m && isOfficer() && m.id !== state.user.id && !m.managed && m.role !== 'former'
+    && (isLeader() || (can('pilots') && ['pending', 'member'].includes(m.role)));
+  const canEditMember = (m) => canRename(m) || canAlias(m) || canLeaderBuild(m) || canPilotOnly(m);
   function openMemberEdit(m, after) {
     const name = esc(displayName(m));
     const rn = canRename(m);
     const al = canAlias(m);
-    const lb = canLeaderBuild(m);
+    const lb = canLeaderBuild(m) && !m.pilot_only;
+    const po = canPilotOnly(m);
     const who = m.managed ? 'Quem pilota esta conta' : `<b>${name}</b>`;
     openDialog(`
       <form id="me-form" class="stack">
@@ -1878,9 +1927,11 @@
           <input id="me-alias" maxlength="40" value="${esc(m.alias || '')}" placeholder="Ex.: Lua Azul" autocomplete="off">
           <small class="muted">Nome simplificado só para as buscas (nick com símbolos ou letras chinesas). Não aparece no site.</small>
         </div>` : ''}
+        ${po ? `<div class="field">
+          <label class="radio"><input type="checkbox" id="me-pilot-only" ${m.pilot_only ? 'checked' : ''}> 🧑‍✈️ <b>Só piloto</b></label>
+        </div>` : ''}
         ${lb ? `${buildFields(pick(m, BUILD_KEYS), false)}
           <p class="lb-warn small" style="margin:0">⚠️ Classe e atributos: só o líder altera. Se mudar algum, ${who} recebe o aviso “Seus atributos foram alterados pela liderança, entrar em contato com a staff.”</p>` : ''}
-        <p class="muted small" style="margin:0">As alterações ficam no histórico do membro, com o seu nome.</p>
         <div class="row end">
           <button type="button" class="btn ghost" data-close>Cancelar</button>
           <button type="submit" class="btn primary">Salvar</button>
@@ -1892,11 +1943,13 @@
         const nick = rn ? $('#me-nick', d).value.trim() : null;
         const alias = al ? $('#me-alias', d).value.trim() : null;
         const b = lb ? readBuild(d) : null;
+        const poVal = po ? $('#me-pilot-only', d).checked : null;
         if (rn && !nick) { toast('Escreva o nick', true); return; }
         const nickCh = rn && nick !== (m.game_name || '');
         const aliasCh = al && alias !== (m.alias || '');
         const buildCh = lb && BUILD_KEYS.some((k) => (m[k] ?? null) !== (b[k] ?? null));
-        if (!nickCh && !aliasCh && !buildCh) { dlg.close(); return; }
+        const poCh = po && poVal !== !!m.pilot_only;
+        if (!nickCh && !aliasCh && !buildCh && !poCh) { dlg.close(); return; }
         submit.disabled = true;
         const done = [];
         try {
@@ -1909,9 +1962,16 @@
             Object.assign(m, b);
             done.push('atributos');
           }
+          if (poCh) {
+            await api.setPilotOnly(m.id, poVal);
+            const mm = memberById(m.id);
+            if (mm) mm.pilot_only = poVal;
+            m.pilot_only = poVal;
+            done.push('cadastro');
+          }
           dlg.close();
           const what = done.length > 1 ? `${done.slice(0, -1).join(', ')} e ${done.at(-1)}` : done[0];
-          toast(`${what[0].toUpperCase()}${what.slice(1)} de ${displayName(m)} ${done.length > 1 || done[0] === 'atributos' ? 'salvos' : 'salvo'}.${buildCh ? ` ${m.managed ? 'Quem pilota a conta' : 'O membro'} foi avisado.` : ''}`);
+          toast(`${what[0].toUpperCase()}${what.slice(1)} de ${displayName(m)} ${done.length > 1 || done[0] === 'atributos' ? 'salvos' : 'salvo'}.${buildCh ? ` ${m.managed ? 'Quem pilota a conta' : 'O membro'} foi avisado.` : ''}${poCh ? (poVal ? ' Agora é só piloto: não conta como membro.' : ' Voltou a contar como membro.') : ''}`);
           await after?.();
         } catch (err) {
           fail(err); submit.disabled = false;
@@ -1959,14 +2019,14 @@
     if (DEMO && !demoBannerOff) {
       banner.innerHTML = `Modo demonstração: dados fictícios, nada é salvo.${state.me ? `
         <label class="demo-role">Ver como
-          <select id="demo-role" class="inline">${['leader', 'officer', 'member', 'former'].map((r) => `<option value="${r}" ${state.me.role === r ? 'selected' : ''}>${ROLE_LABEL[r]}</option>`).join('')}</select>
+          <select id="demo-role" class="inline">${['leader', 'officer', 'member', 'pilot', 'former'].map((r) => `<option value="${r}" ${(state.me.pilot_only ? r === 'pilot' : state.me.role === r) ? 'selected' : ''}>${DEMO_ROLE_LABEL(r)}</option>`).join('')}</select>
         </label>` : ''}
         <button type="button" class="demo-x" id="demo-x" title="Esconder esta faixa (para tirar prints). Volta ao recarregar a página." aria-label="Esconder a faixa da demonstração">✕</button>`;
       $('#demo-x').addEventListener('click', () => { demoBannerOff = true; banner.hidden = true; });
       $('#demo-role')?.addEventListener('change', async (e) => {
         await api.demoSetRole(e.target.value);
         await boot();
-        toast(`Agora você está vendo o site como ${ROLE_LABEL[e.target.value]}`);
+        toast(`Agora você está vendo o site como ${DEMO_ROLE_LABEL(e.target.value)}`);
       });
     }
     main.classList.toggle('wide', currentKey === 'teams' || currentKey === 'freq');
@@ -2004,8 +2064,8 @@
 
     const box = $('#userbox');
     if (state.me) {
-      const accounts = memberUI() ? myAccounts() : [];
-      box.innerHTML = `${accounts.length > 1 ? `<label class="acting" title="Escolha a conta do jogo pela qual você está respondendo">
+      const accounts = memberUI() ? answerAccounts() : [];
+      box.innerHTML = `${accounts.length > 1 || (state.me.pilot_only && accounts.length) ? `<label class="acting" title="Escolha a conta do jogo pela qual você está respondendo">
           <span>Respondendo como</span>
           <select id="acting-select" class="inline">${accounts.map((a) => `<option value="${esc(a.id)}" ${a.id === actingId() ? 'selected' : ''}>${esc(displayName(a))}${a.id === state.user.id ? ' (você)' : ' 🧑‍✈️'}</option>`).join('')}</select>
         </label>` : ''}
@@ -2330,6 +2390,8 @@
   }
 
   function rsvpButtons(ev) {
+    // Só piloto sem conta pilotada aprovada: não responde com a própria conta
+    if (pilotOnlyMe()) return '<div class="rsvp-locked"><span class="muted small">🧑‍✈️ Só piloto: responda pela conta que você pilota (peça acesso em Meu perfil)</span></div>';
     const html = rsvpButtonsRaw(ev);
     const mine = myRsvp(ev);
     // aviso dentro do mesmo bloco dos botões
@@ -3635,11 +3697,12 @@
   // ---------- Histórico de alterações ----------
 
   const FIELD_LABEL = {
-    game_name: 'Nome do personagem', discord_name: 'Nome no Discord', char_class: 'Classe', alias: 'Codinome',
+    game_name: 'Nome do personagem', discord_name: 'Nome no Discord', char_class: 'Classe', alias: 'Codinome', pilot_only: 'Tipo de cadastro',
     ...Object.fromEntries(ATTRS.map((a) => [a.key, a.label])),
   };
   const isAttr = (f) => ATTRS.some((a) => a.key === f);
   function fmtField(f, v) {
+    if (f === 'pilot_only') return v ? 'Só piloto' : 'Membro';
     if (v === null || v === undefined || v === '') return '—';
     if (f === 'char_class') return CLASS[v]?.label || String(v);
     if (isAttr(f)) return fmtNum(Number(v));
@@ -5532,7 +5595,7 @@
 
   function openAddPilotDialog(account, after) {
     const current = new Set(approvedPilotIds(account.id));
-    const list = activeMembers().filter((m) => m.id !== account.id && !current.has(m.id)).sort(byName);
+    const list = activePeople().filter((m) => m.id !== account.id && !current.has(m.id)).sort(byName);
     openDialog(`
       <form id="adp-form" class="stack">
         <h2>Adicionar piloto · ${esc(displayName(account))}</h2>
@@ -6830,7 +6893,8 @@
     const oldNames = (id) => (histBy[id] || []).flatMap((h) => ['game_name', 'discord_name'].map((f) => h.changes?.[f]?.[0])).filter(Boolean);
     const sorted = [...state.members].sort((a, b) => (ROLE_ORDER[a.role] - ROLE_ORDER[b.role]) || byName(a, b));
     const pending = sorted.filter((m) => m.role === 'pending');
-    const active = sorted.filter((m) => ACTIVE_ROLES.includes(m.role));
+    const active = sorted.filter((m) => ACTIVE_ROLES.includes(m.role) && !m.pilot_only);
+    const pilotOnly = sorted.filter((m) => ACTIVE_ROLES.includes(m.role) && m.pilot_only);
     const former = sorted.filter((m) => m.role === 'former');
     const amLeader = state.me.role === 'leader';
     // Quando e por que cada ex-membro saiu
@@ -6881,7 +6945,7 @@
     const row = (m, ctrl) => `<div class="member clickable" data-search="${esc(searchText(m))}" data-profile="${esc(m.id)}" title="Abrir o perfil de ${esc(displayName(m))}">${avatar(m, 'lg')}
       <div class="name"><a class="member-link" href="#/membro/${encodeURIComponent(m.id)}">${esc(displayName(m))}</a>${medalsHtml(m.id)} ${absTag(m)} ${noteBadge(m)} ${pilotLabel(m)} ${formerly(m)}
         <small>${m.managed ? 'conta sem login' : (m.game_name ? esc(m.discord_name) : '')} ${phoneLink(m)}</small>
-        ${m.char_class ? `<div class="member-build">${classTag(m.char_class)}${CLASS[m.char_class].label !== CLASS[m.char_class].short ? ` <span>${esc(CLASS[m.char_class].label)}</span>` : ''}<span class="chip-stats">${statsLine(m)}</span></div>` : '<div class="member-build muted small">Classe e atributos não informados</div>'}
+        ${m.pilot_only ? '' : m.char_class ? `<div class="member-build">${classTag(m.char_class)}${CLASS[m.char_class].label !== CLASS[m.char_class].short ? ` <span>${esc(CLASS[m.char_class].label)}</span>` : ''}<span class="chip-stats">${statsLine(m)}</span></div>` : '<div class="member-build muted small">Classe e atributos não informados</div>'}
       </div>${canEditMember(m) ? `<button class="btn small ghost" data-edit-member="${esc(m.id)}" title="Editar nick, codinome e atributos de ${esc(displayName(m))}">✎ Editar</button>` : ''}${histBtn(m)}${ctrl}</div>`;
 
     main.innerHTML = `
@@ -6916,6 +6980,10 @@
         <div class="card" style="margin-bottom:20px">${pending.map((m) => row(m, `${can('member_remove') ? `<button class="btn small ghost danger" data-remove="${esc(m.id)}">Recusar</button>` : ''}
           ${can('member_approve') ? `<button class="btn small primary" data-approve="${esc(m.id)}">Aprovar</button>` : ''}`)).join('')}</div>` : ''}
       <div class="card">${active.map((m) => row(m, roleControl(m))).join('')}</div>
+      ${pilotOnly.length ? `<details class="former-box pilot-box"${M.q ? ' open' : ''}>
+        <summary>🧑‍✈️ Só pilotos (${pilotOnly.length}) <span class="muted small">· respondem só pelas contas que pilotam e não contam como membros</span></summary>
+        <div class="card">${pilotOnly.map((m) => row(m, roleControl(m))).join('')}</div>
+      </details>` : ''}
       ${isOfficer() && former.length ? `<details class="former-box"${M.q ? ' open' : ''}>
         <summary>Ex-membros (${former.length}) <span class="muted small">· saíram ou foram removidos; o histórico é mantido</span></summary>
         <div class="card">${former.map((m) => row(m, `${leftInfo(m)}${amLeader ? `<button class="btn small" data-readmit="${esc(m.id)}">Readmitir</button>` : ''}`)).join('')}</div>
@@ -7355,7 +7423,7 @@
     const me = state.user.id;
     const mine = []; const lead = [];
     // --- Para mim ---
-    const accs = myAccounts();
+    const accs = answerAccounts();
     state.bellUp.filter((ev) => rsvpOpen(ev)).forEach((ev) => {
       const missing = accs.filter((a) => !ev.rsvps.some((r) => r.user_id === a.id));
       if (!missing.length) return;
