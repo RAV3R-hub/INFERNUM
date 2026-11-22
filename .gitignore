@@ -10,3 +10,6 @@ skills-lock.json
 
 # Grafo do graphify (só no computador, não vai para o site)
 graphify-out/
+
+# Instruções locais do Claude (não vão para o site)
+CLAUDE.md
