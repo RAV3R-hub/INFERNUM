@@ -3232,3 +3232,234 @@ revoke execute on function public.auto_rsvp_discord(public.member_settings, bigi
 revoke execute on function public.apply_auto_rsvp(uuid) from public, anon, authenticated;
 revoke execute on function public.save_member_settings(uuid, boolean, boolean, boolean, boolean) from public, anon;
 grant  execute on function public.save_member_settings(uuid, boolean, boolean, boolean, boolean) to authenticated;
+
+
+-- =====================================================================
+--  Configurações do membro: Rito do Exílio (Novembro/2026)
+--  Rode DEPOIS de configuracoes_membro.sql (já rodado) e ANTES de agenda_membro.sql.
+--  • Acrescenta o Rito do Exílio à presença automática (com a resposta do Discord).
+--  • Cada opção vale para os eventos do TIPO escolhido pela liderança ao criar o
+--    evento: tipo "Guerra…" → Guerras, "Vigília…" → Vigílias, "Rito…" → Ritos.
+--  • Se a liderança trocar o tipo de um evento, a presença automática acompanha:
+--    quem pediu o novo tipo é confirmado; as confirmações automáticas de quem não
+--    pediu o novo tipo saem (respostas dadas pelo próprio membro nunca mudam).
+--  Só ADICIONA duas colunas e troca funções. Nenhum dado existente é alterado ou
+--  apagado. Pode ser executado de novo.
+-- =====================================================================
+
+alter table public.member_settings add column if not exists auto_rite boolean not null default false;
+alter table public.member_settings add column if not exists auto_rite_discord boolean;
+
+-- Tipo do evento → opção das configurações ('war', 'vigil', 'rite' ou null)
+create or replace function public.event_type_key(p_type bigint) returns text
+language sql stable security definer set search_path = public as $$
+  select case when t.name ilike 'guerra%' then 'war'
+              when t.name ilike 'vig_lia%' then 'vigil'
+              when t.name ilike 'rito%' then 'rite' end
+    from public.event_types t where t.id = p_type
+$$;
+
+-- A conta quer confirmar sozinha este tipo de evento? Devolve a resposta do Discord ou null
+create or replace function public.auto_rsvp_discord(s public.member_settings, p_type bigint) returns boolean
+language sql stable security definer set search_path = public as $$
+  select case public.event_type_key(p_type)
+           when 'war'   then case when s.auto_war   then s.auto_war_discord end
+           when 'vigil' then case when s.auto_vigil then s.auto_vigil_discord end
+           when 'rite'  then case when s.auto_rite  then s.auto_rite_discord end
+         end
+$$;
+
+-- Confirma a conta nos eventos futuros sem resposta (devolve quantos)
+create or replace function public.apply_auto_rsvp(p_user uuid) returns integer
+language plpgsql security definer set search_path = public as $$
+declare s public.member_settings; n integer;
+begin
+  select * into s from public.member_settings where user_id = p_user;
+  if not found or not (s.auto_war or s.auto_vigil or s.auto_rite) or not public.is_active_account(p_user) then return 0; end if;
+  insert into public.rsvps (event_id, user_id, going, discord, auto, updated_at,
+                            char_class, armor, armor_pen, potency, resistance, resonance)
+  select e.id, p.id, true, public.auto_rsvp_discord(s, e.type_id), true, now(),
+         p.char_class, p.armor, p.armor_pen, p.potency, p.resistance, p.resonance
+    from public.events e
+    join public.profiles p on p.id = p_user
+   where e.starts_at > now()
+     and public.auto_rsvp_discord(s, e.type_id) is not null
+     and public.can_change_rsvp_for(e.id, p_user)
+     and not exists (select 1 from public.rsvps r where r.event_id = e.id and r.user_id = p_user)
+     and not exists (select 1 from public.absences a where a.user_id = p_user
+                       and public.event_day(e.starts_at) between a.starts_on and a.ends_on)
+  on conflict (event_id, user_id) do nothing;
+  get diagnostics n = row_count;
+  return n;
+end $$;
+
+-- Salva as configurações com o Rito (a própria conta ou quem pilota). Devolve quantos eventos foram confirmados.
+-- (A versão antiga, sem o Rito, continua existindo para o site antigo não quebrar até ser atualizado.)
+create or replace function public.save_member_settings(p_user uuid, p_war boolean, p_war_discord boolean,
+  p_vigil boolean, p_vigil_discord boolean, p_rite boolean, p_rite_discord boolean) returns integer
+language plpgsql security definer set search_path = public as $$
+begin
+  if not public.can_act_as(p_user) then
+    raise exception 'Você não pode mudar as configurações desta conta' using errcode = '42501';
+  end if;
+  if not public.is_active_account(p_user) then raise exception 'Esta conta não está ativa no clã'; end if;
+  if (coalesce(p_war, false) and p_war_discord is null) or (coalesce(p_vigil, false) and p_vigil_discord is null)
+     or (coalesce(p_rite, false) and p_rite_discord is null) then
+    raise exception 'Diga se vai estar no Discord em cada tipo de evento marcado';
+  end if;
+  insert into public.member_settings (user_id, auto_war, auto_war_discord, auto_vigil, auto_vigil_discord,
+                                      auto_rite, auto_rite_discord, updated_at)
+  values (p_user, coalesce(p_war, false), p_war_discord, coalesce(p_vigil, false), p_vigil_discord,
+          coalesce(p_rite, false), p_rite_discord, now())
+  on conflict (user_id) do update set auto_war = excluded.auto_war, auto_war_discord = excluded.auto_war_discord,
+    auto_vigil = excluded.auto_vigil, auto_vigil_discord = excluded.auto_vigil_discord,
+    auto_rite = excluded.auto_rite, auto_rite_discord = excluded.auto_rite_discord, updated_at = now();
+  return public.apply_auto_rsvp(p_user);
+end $$;
+
+-- Evento novo, ou tipo trocado: confirma quem pediu aquele tipo (depois das ausências, que já marcaram "Não vou")
+create or replace function public.events_auto_rsvp() returns trigger
+language plpgsql security definer set search_path = public as $$
+begin
+  if tg_op = 'UPDATE' then
+    if new.type_id is not distinct from old.type_id then return new; end if;
+    -- Tipo trocado: tira as confirmações automáticas de quem não pediu o novo tipo
+    delete from public.rsvps r
+     using public.member_settings s
+     where r.event_id = new.id and r.auto and r.going and s.user_id = r.user_id
+       and public.auto_rsvp_discord(s, new.type_id) is null;
+  end if;
+  if new.starts_at > now() then
+    insert into public.rsvps (event_id, user_id, going, discord, auto, updated_at,
+                              char_class, armor, armor_pen, potency, resistance, resonance)
+    select new.id, p.id, true, public.auto_rsvp_discord(s, new.type_id), true, now(),
+           p.char_class, p.armor, p.armor_pen, p.potency, p.resistance, p.resonance
+      from public.member_settings s
+      join public.profiles p on p.id = s.user_id
+     where (s.auto_war or s.auto_vigil or s.auto_rite)
+       and public.auto_rsvp_discord(s, new.type_id) is not null
+       and public.is_active_account(p.id)
+       and not exists (select 1 from public.absences a where a.user_id = p.id
+                         and public.event_day(new.starts_at) between a.starts_on and a.ends_on)
+    on conflict (event_id, user_id) do nothing;
+  end if;
+  return new;
+end $$;
+drop trigger if exists events_auto_rsvp on public.events;
+create trigger events_auto_rsvp after insert or update of type_id on public.events
+  for each row execute function public.events_auto_rsvp();
+
+revoke execute on function public.event_type_key(bigint) from public, anon;
+grant  execute on function public.event_type_key(bigint) to authenticated;
+revoke execute on function public.save_member_settings(uuid, boolean, boolean, boolean, boolean, boolean, boolean) from public, anon;
+grant  execute on function public.save_member_settings(uuid, boolean, boolean, boolean, boolean, boolean, boolean) to authenticated;
+
+
+-- =====================================================================
+--  Lembretes na agenda do celular (Novembro/2026)
+--  Rode DEPOIS de configuracoes_rito.sql (usa a função event_type_key de lá).
+--  Cada membro escolhe em "Minhas configurações" o que quer lembrar e, para
+--  cada item, com quanto tempo de antecedência. Ao salvar, o site adiciona um
+--  link pessoal (com um código secreto) no Google Agenda ou no iPhone.
+--  A Edge Function "agenda" monta a agenda na hora:
+--  • Guerras, Vigílias e Ritos: os eventos JÁ CRIADOS no site daqueles tipos
+--    (pelo tipo escolhido pela liderança), sem os que ele respondeu "Não vou".
+--  • Cofre (seg a sáb, 12h–13h e 19h–20h) e Assembleia (seg a sáb, 12h–14h e
+--    19h–21h, só no ciclo das Sombras): eventos do jogo, nos horários escolhidos.
+--  Só CRIA uma tabela e funções novas. Nenhum dado existente é alterado ou
+--  apagado. Pode ser executado de novo.
+-- =====================================================================
+
+create table if not exists public.member_calendar (
+  user_id        uuid primary key references public.profiles(id) on delete cascade,
+  token          text not null unique default replace(gen_random_uuid()::text, '-', ''),
+  cal_war        boolean not null default false,
+  war_alarm      integer not null default 0 check (war_alarm in (0, 15, 30, 60, 120)),
+  cal_vigil      boolean not null default false,
+  vigil_alarm    integer not null default 0 check (vigil_alarm in (0, 15, 30, 60, 120)),
+  cal_rite       boolean not null default false,
+  rite_alarm     integer not null default 0 check (rite_alarm in (0, 15, 30, 60, 120)),
+  cal_vault      boolean not null default false,
+  vault_slot     text not null default 'both' check (vault_slot in ('12', '19', 'both')),
+  vault_alarm    integer not null default 0 check (vault_alarm in (0, 15, 30, 60, 120)),
+  cal_assembly   boolean not null default false,
+  assembly_slot  text not null default 'both' check (assembly_slot in ('12', '19', 'both')),
+  assembly_alarm integer not null default 0 check (assembly_alarm in (0, 15, 30, 60, 120)),
+  updated_at     timestamptz not null default now()
+);
+alter table public.member_calendar enable row level security;
+-- Ver: só a própria conta e quem pilota (o link é pessoal). Escrever: só pela função abaixo.
+drop policy if exists "member_calendar_select" on public.member_calendar;
+create policy "member_calendar_select" on public.member_calendar
+  for select to authenticated using (public.can_act_as(user_id));
+
+-- Salva a escolha (p = { cal_war, war_alarm, ..., cal_vault, vault_slot, vault_alarm, ... }) e devolve o código do link
+create or replace function public.save_member_calendar(p_user uuid, p jsonb) returns text
+language plpgsql security definer set search_path = public as $$
+declare v_token text; k text;
+begin
+  if not public.can_act_as(p_user) then
+    raise exception 'Você não pode mudar as configurações desta conta' using errcode = '42501';
+  end if;
+  if not public.is_active_account(p_user) then raise exception 'Esta conta não está ativa no clã'; end if;
+  foreach k in array array['war', 'vigil', 'rite', 'vault', 'assembly'] loop
+    if coalesce(p->>(k || '_alarm'), '0') not in ('0', '15', '30', '60', '120') then
+      raise exception 'Antecedência do lembrete inválida';
+    end if;
+  end loop;
+  foreach k in array array['vault', 'assembly'] loop
+    if coalesce(p->>(k || '_slot'), 'both') not in ('12', '19', 'both') then raise exception 'Horário do lembrete inválido'; end if;
+  end loop;
+  insert into public.member_calendar (user_id, cal_war, war_alarm, cal_vigil, vigil_alarm, cal_rite, rite_alarm,
+                                      cal_vault, vault_slot, vault_alarm, cal_assembly, assembly_slot, assembly_alarm, updated_at)
+  values (p_user,
+          coalesce((p->>'cal_war')::boolean, false), coalesce((p->>'war_alarm')::int, 0),
+          coalesce((p->>'cal_vigil')::boolean, false), coalesce((p->>'vigil_alarm')::int, 0),
+          coalesce((p->>'cal_rite')::boolean, false), coalesce((p->>'rite_alarm')::int, 0),
+          coalesce((p->>'cal_vault')::boolean, false), coalesce(p->>'vault_slot', 'both'), coalesce((p->>'vault_alarm')::int, 0),
+          coalesce((p->>'cal_assembly')::boolean, false), coalesce(p->>'assembly_slot', 'both'), coalesce((p->>'assembly_alarm')::int, 0),
+          now())
+  on conflict (user_id) do update set
+    cal_war = excluded.cal_war, war_alarm = excluded.war_alarm,
+    cal_vigil = excluded.cal_vigil, vigil_alarm = excluded.vigil_alarm,
+    cal_rite = excluded.cal_rite, rite_alarm = excluded.rite_alarm,
+    cal_vault = excluded.cal_vault, vault_slot = excluded.vault_slot, vault_alarm = excluded.vault_alarm,
+    cal_assembly = excluded.cal_assembly, assembly_slot = excluded.assembly_slot, assembly_alarm = excluded.assembly_alarm,
+    updated_at = now()
+  returning token into v_token;
+  return v_token;
+end $$;
+
+-- Agenda de um link (usada só pela Edge Function "agenda", com a chave de serviço)
+create or replace function public.calendar_feed(p_token text) returns json
+language sql stable security definer set search_path = public as $$
+  select json_build_object(
+    'name', coalesce(nullif(trim(p.game_name), ''), p.discord_name),
+    'events', coalesce((
+      select json_agg(json_build_object('id', e.id, 'title', e.title, 'starts_at', e.starts_at,
+                                        'description', e.description, 'alarm', x.alarm) order by e.starts_at)
+        from public.events e
+        cross join lateral (
+          select case public.event_type_key(e.type_id)
+                   when 'war'   then case when c.cal_war   then c.war_alarm end
+                   when 'vigil' then case when c.cal_vigil then c.vigil_alarm end
+                   when 'rite'  then case when c.cal_rite  then c.rite_alarm end
+                 end as alarm) x
+       where e.starts_at > now() - interval '7 days'
+         and x.alarm is not null
+         and not exists (select 1 from public.rsvps r
+                          where r.event_id = e.id and r.user_id = c.user_id and not r.going)
+    ), '[]'::json),
+    'vault', case when c.cal_vault then json_build_object('slot', c.vault_slot, 'alarm', c.vault_alarm) end,
+    'assembly', case when c.cal_assembly then json_build_object('slot', c.assembly_slot, 'alarm', c.assembly_alarm) end,
+    'cycles', coalesce((select json_agg(json_build_object('starts_on', cy.starts_on, 'side', cy.side) order by cy.starts_on)
+                          from public.clan_cycles cy), '[]'::json))
+  from public.member_calendar c
+  join public.profiles p on p.id = c.user_id
+  where c.token = p_token and public.is_active_account(c.user_id)
+$$;
+
+revoke execute on function public.save_member_calendar(uuid, jsonb) from public, anon;
+revoke execute on function public.calendar_feed(text) from public, anon, authenticated;
+grant  execute on function public.save_member_calendar(uuid, jsonb) to authenticated;
+grant  execute on function public.calendar_feed(text) to service_role;

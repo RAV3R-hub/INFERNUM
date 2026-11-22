@@ -181,11 +181,20 @@
       // Configurações do membro (null = SQL ainda não rodado)
       async memberSettings(userId) {
         const r = await sb.from('member_settings').select('*').eq('user_id', userId).maybeSingle();
-        return r.error ? null : r.data || { user_id: userId, auto_war: false, auto_war_discord: null, auto_vigil: false, auto_vigil_discord: null };
+        return r.error ? null : r.data || { user_id: userId, auto_war: false, auto_war_discord: null, auto_vigil: false, auto_vigil_discord: null, auto_rite: false, auto_rite_discord: null };
       },
       async saveMemberSettings(userId, o) {
         return ok(await sb.rpc('save_member_settings', { p_user: userId, p_war: !!o.auto_war, p_war_discord: o.auto_war_discord ?? null,
-          p_vigil: !!o.auto_vigil, p_vigil_discord: o.auto_vigil_discord ?? null }));
+          p_vigil: !!o.auto_vigil, p_vigil_discord: o.auto_vigil_discord ?? null, p_rite: !!o.auto_rite, p_rite_discord: o.auto_rite_discord ?? null }));
+      },
+      // Lembretes na agenda (null = SQL ainda não rodado)
+      async memberCalendar(userId) {
+        const r = await sb.from('member_calendar').select('*').eq('user_id', userId).maybeSingle();
+        return r.error ? null : r.data || { user_id: userId, token: null, cal_war: false, war_alarm: 0, cal_vigil: false, vigil_alarm: 0, cal_rite: false, rite_alarm: 0,
+          cal_vault: false, vault_slot: 'both', vault_alarm: 0, cal_assembly: false, assembly_slot: 'both', assembly_alarm: 0 };
+      },
+      async saveMemberCalendar(userId, o) {
+        return ok(await sb.rpc('save_member_calendar', { p_user: userId, p: o }));
       },
       async saveAbsence(userId, start, end, reason) { return ok(await sb.rpc('save_absence', { p_user: userId, p_start: start, p_end: end, p_reason: reason })); },
       async deleteAbsence(id) { ok(await sb.rpc('delete_absence', { p_id: id })); },
@@ -817,14 +826,17 @@
     }
     // Confirmação automática (Guerras / Vigílias), igual ao banco: só eventos futuros sem resposta e sem ausência
     db.memberSettings = {};
+    db.memberCalendar = {};
+    const demoToken = () => Array.from({ length: 32 }, () => '0123456789abcdef'[Math.floor(Math.random() * 16)]).join('');
     function applyAutoDemo(uid, events = db.events, isNew = false) {
       const s = db.memberSettings[uid];
       const p = profile(uid);
-      if (!s || !(s.auto_war || s.auto_vigil) || !p || !ACTIVE_ROLES.includes(p.role)) return 0;
+      if (!s || !(s.auto_war || s.auto_vigil || s.auto_rite) || !p || !ACTIVE_ROLES.includes(p.role)) return 0;
       // Resposta do Discord para o tipo do evento, ou null quando a conta não quer confirmar esse tipo
       const dcFor = (e) => {
         const t = norm(db.types.find((x) => x.id === e.type_id)?.name);
-        return s.auto_war && t.includes('guerra') ? s.auto_war_discord : s.auto_vigil && /vig.lia/.test(t) ? s.auto_vigil_discord : null;
+        const k = t.startsWith('guerra') ? 'war' : t.startsWith('vigilia') ? 'vigil' : t.startsWith('rito') ? 'rite' : null;
+        return k && s[`auto_${k}`] ? s[`auto_${k}_discord`] : null;
       };
       let n = 0;
       events.filter((e) => Date.parse(e.starts_at) > Date.now() && dcFor(e) != null
@@ -943,13 +955,25 @@
       },
       async memberSettings(userId) {
         if (!(canActAsDemo(userId) || isOfficer())) return null;
-        return { user_id: userId, auto_war: false, auto_war_discord: null, auto_vigil: false, auto_vigil_discord: null, ...(db.memberSettings[userId] || {}) };
+        return { user_id: userId, auto_war: false, auto_war_discord: null, auto_vigil: false, auto_vigil_discord: null, auto_rite: false, auto_rite_discord: null, ...(db.memberSettings[userId] || {}) };
       },
       async saveMemberSettings(userId, o) {
         if (!canActAsDemo(userId)) throw new Error('Você não pode mudar as configurações desta conta');
-        if ((o.auto_war && o.auto_war_discord == null) || (o.auto_vigil && o.auto_vigil_discord == null)) throw new Error('Diga se vai estar no Discord em cada tipo de evento marcado');
-        db.memberSettings[userId] = { auto_war: !!o.auto_war, auto_war_discord: o.auto_war_discord ?? null, auto_vigil: !!o.auto_vigil, auto_vigil_discord: o.auto_vigil_discord ?? null };
+        if (['war', 'vigil', 'rite'].some((k) => o[`auto_${k}`] && o[`auto_${k}_discord`] == null)) throw new Error('Diga se vai estar no Discord em cada tipo de evento marcado');
+        db.memberSettings[userId] = { auto_war: !!o.auto_war, auto_war_discord: o.auto_war_discord ?? null, auto_vigil: !!o.auto_vigil, auto_vigil_discord: o.auto_vigil_discord ?? null, auto_rite: !!o.auto_rite, auto_rite_discord: o.auto_rite_discord ?? null };
         return applyAutoDemo(userId);
+      },
+      async memberCalendar(userId) {
+        if (!canActAsDemo(userId)) return null;
+        return { user_id: userId, token: null, cal_war: false, war_alarm: 0, cal_vigil: false, vigil_alarm: 0, cal_rite: false, rite_alarm: 0,
+          cal_vault: false, vault_slot: 'both', vault_alarm: 0, cal_assembly: false, assembly_slot: 'both', assembly_alarm: 0, ...(db.memberCalendar[userId] || {}) };
+      },
+      async saveMemberCalendar(userId, o) {
+        if (!canActAsDemo(userId)) throw new Error('Você não pode mudar as configurações desta conta');
+        if (![o.war_alarm, o.vigil_alarm, o.rite_alarm, o.vault_alarm ?? 0, o.assembly_alarm ?? 0].every((v) => [0, 15, 30, 60, 120].includes(v))) throw new Error('Antecedência do lembrete inválida');
+        const cur = db.memberCalendar[userId] || { token: demoToken() };
+        db.memberCalendar[userId] = { ...cur, cal_war: !!o.cal_war, war_alarm: o.war_alarm, ...o };
+        return db.memberCalendar[userId].token;
       },
       async absences() { return db.absences.filter((a) => isOfficer() || canActAsDemo(a.user_id)).map((a) => ({ ...a })); },
       async saveAbsence(userId, start, end, reason) {
@@ -1149,7 +1173,16 @@
         if (accept) { r.going = false; r.discord = null; dropSlot(eventId, userId); }
         r.withdraw_reason = null; r.withdraw_requested_at = null;
       },
-      async updateEvent(id, row) { const e = db.events.find((x) => x.id === id); logEventUpdate(e, row); Object.assign(e, row); },
+      async updateEvent(id, row) {
+        const e = db.events.find((x) => x.id === id);
+        const typeChanged = 'type_id' in row && (row.type_id ?? null) !== (e.type_id ?? null);
+        logEventUpdate(e, row); Object.assign(e, row);
+        // Tipo trocado: a presença automática acompanha (igual ao banco)
+        if (typeChanged) {
+          db.rsvps = db.rsvps.filter((r) => !(r.event_id === id && r.auto && r.going && db.memberSettings[r.user_id]));
+          Object.keys(db.memberSettings).forEach((uid) => applyAutoDemo(uid, [e], true));
+        }
+      },
       async eventLog(eventId) {
         if (!isOfficer()) return [];
         return db.elog.filter((x) => x.event_id === eventId)
@@ -1887,6 +1920,7 @@
   const UA = navigator.userAgent || '';
   const IN_APP = /WhatsApp|FBAN|FBAV|FB_IAB|Instagram|Discord|Telegram|Line\/|; wv\)/i.test(UA);
   const IS_ANDROID = /Android/i.test(UA);
+  const IS_IOS = /iPhone|iPad|iPod/i.test(UA) || (/Macintosh/i.test(UA) && navigator.maxTouchPoints > 1); // iPad novo se apresenta como Mac
   // Voltou do Discord mas o login não terminou neste navegador?
   let loginFailed = false;
   try {
@@ -3554,10 +3588,21 @@
   // Texto usado nas buscas de membros (sem acentos e sem maiúsculas)
   const memberSearchText = (m, extra = []) => norm([displayName(m), m.discord_name, m.alias, ...extra].filter(Boolean).join(' '));
   // ---------- Minhas configurações (a minha conta ou uma conta que eu pilote) ----------
+  // Uma linha por tipo de evento: presença automática (com o Discord) e lembrete na agenda (com a antecedência)
   const AUTO_TYPES = [
     { key: 'war', label: '⚔️ Guerras das Sombras' },
     { key: 'vigil', label: '🌙 Vigílias' },
+    { key: 'rite', label: '🔥 Ritos do Exílio' },
   ];
+  // Eventos do jogo: só lembrete na agenda (sem presença), de segunda a sábado, nos horários escolhidos
+  const GAME_REMINDERS = [
+    { key: 'vault', label: '💰 Cofre', game: true },
+    { key: 'assembly', label: '🏛️ Assembleia', note: 'Só no ciclo das Sombras', game: true },
+  ];
+  const CAL_KEYS = [...AUTO_TYPES, ...GAME_REMINDERS];
+  const CAL_SLOTS = [['both', '12h e 19h'], ['12', 'Só 12h'], ['19', 'Só 19h']];
+  const CAL_ALARMS = [[0, 'Na hora'], [15, '15 min antes'], [30, '30 min antes'], [60, '1 h antes'], [120, '2 h antes']];
+  const CAL_FEED = `${CFG.supabaseUrl || 'https://exemplo.supabase.co'}/functions/v1/agenda`;
   async function viewMySettings(accountId) {
     const id = accountId || state.user.id;
     const accs = myAccounts();
@@ -3565,7 +3610,7 @@
     if (!acc) { location.hash = '#/minhas-configuracoes'; return; }
     loading();
     const self = id === state.user.id;
-    const s = await api.memberSettings(id);
+    const [s, cal] = await Promise.all([api.memberSettings(id), api.memberCalendar(id).catch(() => null)]);
     const back = self ? '<a href="#/perfil" class="small">← Meu perfil</a>' : `<a href="#/membro/${encodeURIComponent(id)}" class="small">← Perfil de ${esc(displayName(acc))}</a>`;
     const picker = accs.length > 1 ? `<select class="inline" id="ms-acc" aria-label="Conta">
         ${accs.map((a) => `<option value="${esc(a.id)}" ${a.id === id ? 'selected' : ''}>${esc(displayName(a))}${a.id === state.user.id ? ' (você)' : ''}</option>`).join('')}
@@ -3579,36 +3624,93 @@
       bindPicker(); return;
     }
     const dcOpt = (k, v, label) => `<label class="radio"><input type="radio" name="ms-${k}-dc" value="${v ? 1 : 0}" ${s[`auto_${k}_discord`] === v ? 'checked' : ''}> ${label}</label>`;
+    const autoCell = (t) => `<div class="ms-cell">
+        <span class="ms-cell-head">✅ Presença automática</span>
+        <label class="radio"><input type="checkbox" id="ms-${t.key}" ${s[`auto_${t.key}`] ? 'checked' : ''}> Confirmar</label>
+        <div class="ms-dc" id="ms-${t.key}-dc" ${s[`auto_${t.key}`] ? '' : 'hidden'}>${dcOpt(t.key, true, '🎧 Com Discord')}${dcOpt(t.key, false, 'Sem Discord')}</div>
+      </div>`;
+    const calCell = (t) => (cal ? `<div class="ms-cell">
+        <span class="ms-cell-head">📅 Lembrete na agenda</span>
+        <label class="radio"><input type="checkbox" id="mc-${t.key}" ${cal[`cal_${t.key}`] ? 'checked' : ''}> Lembrar</label>
+        ${t.game ? `<select class="inline" id="mc-${t.key}-slot" aria-label="Horário" ${cal[`cal_${t.key}`] ? '' : 'disabled'}>
+          ${CAL_SLOTS.map(([v, l]) => `<option value="${v}" ${(cal[`${t.key}_slot`] || 'both') === v ? 'selected' : ''}>${l}</option>`).join('')}
+        </select>` : ''}
+        <select class="inline" id="mc-${t.key}-alarm" aria-label="Quando avisar" ${cal[`cal_${t.key}`] ? '' : 'disabled'}>
+          ${CAL_ALARMS.map(([v, l]) => `<option value="${v}" ${(cal[`${t.key}_alarm`] ?? 0) === v ? 'selected' : ''}>${l}</option>`).join('')}
+        </select>
+      </div>` : '');
     main.innerHTML = `${head}
       <form class="card ms-card" id="ms">
-        <h2>✅ Confirmar presença automaticamente</h2>
-        ${AUTO_TYPES.map((t) => `<div class="ms-row">
-          <label class="radio ms-main"><input type="checkbox" id="ms-${t.key}" ${s[`auto_${t.key}`] ? 'checked' : ''}> ${t.label}</label>
-          <div class="ms-dc" id="ms-${t.key}-dc" ${s[`auto_${t.key}`] ? '' : 'hidden'}>
-            <span class="muted small">Nesses eventos:</span>
-            ${dcOpt(t.key, true, '🎧 Vou estar no Discord')}
-            ${dcOpt(t.key, false, 'Não vou usar o Discord')}
-          </div>
-        </div>`).join('')}
+        <div class="ms-grid${cal ? '' : ' one'}">
+          <div class="ms-th"></div><div class="ms-th">✅ Presença automática</div>${cal ? '<div class="ms-th">📅 Lembrete na agenda</div>' : ''}
+          ${AUTO_TYPES.map((t) => `<div class="ms-ev">${t.label}</div>${autoCell(t)}${calCell(t)}`).join('')}
+          ${cal ? GAME_REMINDERS.map((g) => `<div class="ms-ev"><span>${g.label}${g.note ? `<small class="muted">${g.note}</small>` : ''}</span></div><div class="ms-cell ms-na"><span class="muted">—</span></div>${calCell(g)}`).join('') : ''}
+        </div>
         <div class="row end"><button type="submit" class="btn primary">Salvar</button></div>
       </form>`;
     bindPicker();
-    AUTO_TYPES.forEach((t) => $(`#ms-${t.key}`).addEventListener('change', (e) => { $(`#ms-${t.key}-dc`).hidden = !e.target.checked; }));
+    AUTO_TYPES.forEach((t) => {
+      $(`#ms-${t.key}`).addEventListener('change', (e) => { $(`#ms-${t.key}-dc`).hidden = !e.target.checked; });
+    });
+    CAL_KEYS.forEach((t) => $(`#mc-${t.key}`)?.addEventListener('change', (e) => {
+      [$(`#mc-${t.key}-alarm`), $(`#mc-${t.key}-slot`)].forEach((el) => { if (el) el.disabled = !e.target.checked; });
+    }));
+    // Ao salvar com algum lembrete ligado, já adiciona a agenda neste aparelho (uma vez por aparelho e conta):
+    // iPhone/iPad abre o Calendário; computador abre o Google Agenda; Android explica o caminho pelo computador
+    // (o Google só aceita adicionar pelo computador). Depois disso, mudanças chegam sozinhas pela própria agenda.
+    const addedKey = `agenda-added:${id}`;
+    const wasAdded = () => { try { return localStorage.getItem(addedKey) === '1'; } catch { return false; } };
+    const markAdded = () => { try { localStorage.setItem(addedKey, '1'); } catch { /* sem armazenamento: pode perguntar de novo */ } };
+    function addToCalendar() {
+      if (!cal?.token || !CAL_KEYS.some((t) => cal[`cal_${t.key}`]) || wasAdded()) return;
+      const webcal = `${CAL_FEED}?t=${cal.token}`.replace(/^https?:/, 'webcal:');
+      const google = `https://calendar.google.com/calendar/r?cid=${encodeURIComponent(webcal)}`;
+      markAdded();
+      if (IS_IOS) { location.href = webcal; return; }
+      if (IS_ANDROID) {
+        openDialog(`<div class="stack">
+          <h2>📅 Agenda no Android</h2>
+          <p style="margin:0">No Android, o Google Agenda só deixa adicionar a agenda do clã pelo <b>computador</b>:
+            abra <b>infernumcla.com.br</b> no computador, vá em <b>Minhas configurações</b> e clique em <b>Salvar</b>.</p>
+          <p class="muted small" style="margin:0">Use a mesma conta Google do celular: a agenda INFERNUM aparece sozinha no Android.</p>
+          <div class="row end"><button type="button" class="btn primary" data-close>Entendi</button></div>
+        </div>`);
+        return;
+      }
+      const w = window.open(google, '_blank');
+      if (w) { w.opener = null; return; }
+      // Bloqueador de janelas: oferece o link
+      openDialog(`<div class="stack">
+        <h2>📅 Adicionar à agenda</h2>
+        <p style="margin:0">Abra o Google Agenda para confirmar a agenda do clã. Depois, ajuste o aviso em Configurações → INFERNUM → Notificações.</p>
+        <div class="row end"><a class="btn primary" href="${esc(google)}" target="_blank" rel="noopener" data-close>Abrir o Google Agenda</a></div>
+      </div>`);
+    }
     $('#ms').addEventListener('submit', async (e) => {
       e.preventDefault();
       const o = {};
+      const c = {};
       for (const t of AUTO_TYPES) {
         const on = $(`#ms-${t.key}`).checked;
         const dc = $(`input[name="ms-${t.key}-dc"]:checked`);
-        if (on && !dc) { toast(`${t.label.replace(/^\S+\s/, '')}: diga se vai estar no Discord`, true); return; }
+        if (on && !dc) { toast(`${t.label.replace(/^\S+\s/, '')}: escolha com ou sem Discord`, true); return; }
         o[`auto_${t.key}`] = on;
         o[`auto_${t.key}_discord`] = dc ? dc.value === '1' : null;
+      }
+      if (cal) {
+        for (const t of CAL_KEYS) {
+          c[`cal_${t.key}`] = $(`#mc-${t.key}`).checked;
+          c[`${t.key}_alarm`] = Number($(`#mc-${t.key}-alarm`).value);
+          if (t.game) c[`${t.key}_slot`] = $(`#mc-${t.key}-slot`).value;
+        }
       }
       const btn = e.submitter || $('#ms button[type=submit]');
       btn.disabled = true;
       try {
-        const n = await api.saveMemberSettings(id, o);
+        const [n, token] = await Promise.all([api.saveMemberSettings(id, o), cal ? api.saveMemberCalendar(id, c) : null]);
+        if (cal) Object.assign(cal, c, { token });
         toast(n ? `Configurações salvas · presença confirmada em ${n} ${n === 1 ? 'evento já agendado' : 'eventos já agendados'}` : 'Configurações salvas');
+        addToCalendar();
       } catch (err) { fail(err); }
       btn.disabled = false;
     });
