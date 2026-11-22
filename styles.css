@@ -1269,3 +1269,7 @@ body.has-fab main { padding-bottom: 90px; }
   .me-card .row.me-actions { min-width: 0; }
 }
 .bn-notice .row.end { justify-content: flex-end; }
+
+/* Liderança move o membro entre Vou / Não vou / Sem resposta */
+.people li .mv-btn { margin-left: auto; padding: 1px 8px; line-height: 1.4; }
+.people li .cls ~ .mv-btn, .people li .dc ~ .mv-btn { margin-left: 6px; }

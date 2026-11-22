@@ -147,6 +147,9 @@ Em cada sala, na página do evento e no painel **⚔ Montar times**, aparece **�
 Se outro oficial salvar os times enquanto você edita, o aviso antes de substituir diz quem foi e a que horas.
 Os membros comuns não veem o histórico. Ele começa a contar a partir de quando o [`supabase/historico_eventos.sql`](supabase/historico_eventos.sql) for executado (veja **Dicas**).
 
+**⇄ Mover entre as listas** (oficial ou líder): na página do evento, o botão **⇄** ao lado de cada nome passa o membro para **Vou**, **Não vou** ou **Sem resposta**, até o evento terminar.
+Para "Vou", a classe e os atributos vêm do perfil. Cada mudança fica no **🕘 Histórico de alterações** do evento, com quem fez e quando. Precisa do [`supabase/presenca_lideranca.sql`](supabase/presenca_lideranca.sql).
+
 **Registrar presença** (oficial ou líder): depois que o evento começa, ele mostra o aviso **📋 Registrar presença**.
 A lista já vem marcada com quem confirmou "Vou"; basta desmarcar quem faltou e marcar quem apareceu sem avisar.
 

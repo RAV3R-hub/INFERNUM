@@ -294,6 +294,7 @@
       async requestWithdrawal(eventId, reason, accountId) { ok(await sb.rpc('request_withdrawal', { p_event: eventId, p_reason: reason, p_user: accountId || state.user.id })); },
       async cancelWithdrawal(eventId, accountId) { ok(await sb.rpc('cancel_withdrawal', { p_event: eventId, p_user: accountId || state.user.id })); },
       async resolveWithdrawal(eventId, userId, accept) { ok(await sb.rpc('resolve_withdrawal', { p_event: eventId, p_user: userId, p_accept: accept })); },
+      async staffSetRsvp(eventId, userId, status) { ok(await sb.rpc('staff_set_rsvp', { p_event: eventId, p_user: userId, p_status: status })); },
       async updateEvent(id, row) { ok(await sb.from('events').update(row).eq('id', id)); },
       async deleteEvent(id) { ok(await sb.from('events').delete().eq('id', id)); },
       // accountId = conta do jogo que está respondendo (a própria ou uma conta pilotada)
@@ -1205,6 +1206,27 @@
         db.pilots = db.pilots.filter((p) => !(p.account_id === accountId && p.pilot_id === pilotId));
         db.pilots.push({ account_id: accountId, pilot_id: pilotId, status: 'approved', reason: null, requested_at: new Date().toISOString(), decided_at: new Date().toISOString(), decided_by: state.user.id });
       },
+      async staffSetRsvp(eventId, userId, status) {
+        if (!isOfficer()) throw new Error('Só oficiais e o líder podem mudar a resposta de outro membro');
+        if (!['going', 'not_going', 'none'].includes(status)) throw new Error('Opção inválida');
+        const e = db.events.find((x) => x.id === eventId);
+        if (!e) throw new Error('Evento não encontrado');
+        if (Date.parse(e.starts_at) < Date.now() - 20 * 60000) throw new Error('Este evento já terminou: use “Registrar presença”');
+        const p = profile(userId);
+        if (!p || !ACTIVE_ROLES.includes(p.role)) throw new Error('Esta pessoa não está ativa no clã');
+        if (p.pilot_only) throw new Error('Esta pessoa é só piloto: mova a conta que ela pilota');
+        let r = db.rsvps.find((x) => x.event_id === eventId && x.user_id === userId);
+        const from = !r ? 'none' : r.going ? 'going' : 'not_going';
+        if (from === status) return;
+        const go = status === 'going';
+        if (status === 'none') db.rsvps = db.rsvps.filter((x) => x !== r);
+        else {
+          if (!r) { r = { event_id: eventId, user_id: userId }; db.rsvps.push(r); }
+          Object.assign(r, { going: go, discord: null, auto: false, answered_by: state.user.id, withdraw_reason: null, withdraw_requested_at: null }, go ? { ...pick(p, BUILD_KEYS), absence_id: null } : {});
+        }
+        if (!go) dropSlot(eventId, userId);
+        elog(eventId, 'rsvp', null, { user: userId, from, to: status });
+      },
       async resolveWithdrawal(eventId, userId, accept) {
         if (!isOfficer()) throw new Error('Sem permissão');
         const r = db.rsvps.find((x) => x.event_id === eventId && x.user_id === userId);
@@ -1544,6 +1566,7 @@
       { key: 'teams_build', label: 'Montar e revisar times', desc: 'Formato, sugestão, renomear e salvar os times' },
       { key: 'teams_lock', label: 'Travar e destravar times' },
       { key: 'withdraw_decide', label: 'Decidir pedidos de saída' },
+      { key: 'rsvp_manage', label: 'Mover membros entre as listas', desc: 'Na página do evento: passar alguém para Vou, Não vou ou Sem resposta (fica no histórico do evento)' },
       { key: 'attendance', label: 'Registrar presença real' },
     ] },
     { group: 'Membros', items: [
@@ -2782,6 +2805,10 @@
       if (d.description) parts.push('descrição');
       return `📝 Editou o evento: ${parts.join(' · ')}`;
     }
+    if (x.kind === 'rsvp') {
+      const L = { going: '<span class="c-yes">Vou</span>', not_going: '<span class="c-no">Não vou</span>', none: 'Sem resposta' };
+      return `✋ Moveu <b>${esc(nameOf(d.user))}</b> de ${L[d.from] || esc(d.from)} para <b>${L[d.to] || esc(d.to)}</b>`;
+    }
     if (x.kind === 'room') {
       const bits = [];
       if (d.added?.length) bits.push(`<span class="c-yes">entrou</span> ${who(d.added)}`);
@@ -2805,7 +2832,7 @@
     };
     openDialog(`<div class="stack ev-log">
         <h2>🕘 Histórico de alterações</h2>
-        <p class="muted small" style="margin:0">${esc(ev.title)} · ${esc(fmtDay(ev.starts_at))}. Quem alterou o evento e cada sala, do mais recente para o mais antigo.</p>
+        <p class="muted small" style="margin:0">${esc(ev.title)} · ${esc(fmtDay(ev.starts_at))}. Quem alterou o evento, as respostas e cada sala, do mais recente para o mais antigo.</p>
         ${blocks.length ? `<div class="ev-log-list">${blocks.map((b) => `<div class="ev-log-item">
             <div class="ev-log-head">${actorLabel(b.actor)} <span class="muted small">· ${esc(fmtWhen(b.at))}</span></div>
             <ul>${b.items.map((x) => `<li>${eventLogLine(x)}</li>`).join('')}</ul>
@@ -2911,12 +2938,15 @@
     const responded = new Set(ev.rsvps.map((r) => r.user_id));
     const none = activeMembers().filter((m) => !responded.has(m.id)).map((p) => ({ p })).sort(sortX);
     const onDiscord = yes.filter((x) => x.r.discord);
+    // Liderança move o membro entre as listas (evento ainda não terminou)
+    const canMove = can('rsvp_manage') && isOpen(ev);
+    const moveBtn = (p) => (canMove ? `<button type="button" class="btn small ghost mv-btn" data-move="${esc(p.id)}" title="Mover ${esc(displayName(p))} para outra lista" aria-label="Mover ${esc(displayName(p))} para outra lista">⇄</button>` : '');
     const list = (arr, withClass) => (arr.length
       ? `<ul class="people">${arr.map((x) => {
         // Quando um piloto respondeu pela conta, mostra quem foi
         const by = x.r?.answered_by && x.r.answered_by !== x.p.id ? memberById(x.r.answered_by) : null;
         const note = x.r?.absence_id && !x.r.going ? '✈️ ausência programada' : x.r?.auto && x.r.going ? '🤖 confirmação automática' : by ? `respondido por ${displayName(by)}` : '';
-        return personLine(x.p, withClass ? buildFor(x.r, x.p) : null, withClass && x.r?.discord, note);
+        return personLine(x.p, withClass ? buildFor(x.r, x.p) : null, withClass && x.r?.discord, note).replace(/<\/li>$/, `${moveBtn(x.p)}</li>`);
       }).join('')}</ul>`
       : '<p class="muted small">Ninguém</p>');
 
@@ -3024,6 +3054,31 @@
       try { await api.resolveWithdrawal(ev.id, uid, accept); toast(accept ? 'Saída aceita' : 'Pedido recusado'); await viewEvent(id); } catch (e) { fail(e); }
     };
     main.querySelectorAll('[data-wd-accept]').forEach((b) => b.addEventListener('click', () => resolve(b.dataset.wdAccept, true)));
+    const MV = { going: '✔ Vou', not_going: '✖ Não vou', none: 'Sem resposta' };
+    const MV_TXT = { going: 'Vou', not_going: 'Não vou', none: 'Sem resposta' };
+    main.querySelectorAll('[data-move]').forEach((b) => b.addEventListener('click', () => {
+      const uid = b.dataset.move;
+      const p = memberById(uid);
+      const r = ev.rsvps.find((x) => x.user_id === uid);
+      const from = !r ? 'none' : r.going ? 'going' : 'not_going';
+      const team = slots.get(uid);
+      openDialog(`<div class="stack">
+          <h2>Mover ${esc(displayName(p))}</h2>
+          <p class="muted small" style="margin:0">Hoje em: <b>${MV_TXT[from]}</b>${from === 'going' && team ? ` · no time ${esc(team)}` : ''}</p>
+          <div class="row" style="gap:8px;flex-wrap:wrap">${Object.keys(MV).filter((k) => k !== from).map((k) => `<button type="button" class="btn ${k === 'going' ? 'yes' : k === 'not_going' ? 'no' : 'ghost'}" data-to="${k}">${MV[k]}</button>`).join('')}</div>
+          <div class="row end"><button type="button" class="btn ghost" data-close>Cancelar</button></div>
+        </div>`, (d) => {
+        d.querySelectorAll('[data-to]').forEach((t) => t.addEventListener('click', async () => {
+          d.querySelectorAll('[data-to]').forEach((x) => { x.disabled = true; });
+          try {
+            await api.staffSetRsvp(ev.id, uid, t.dataset.to);
+            dlg.close();
+            toast(`${displayName(p)} agora está em “${MV_TXT[t.dataset.to]}”`);
+            await viewEvent(id);
+          } catch (err) { fail(err); d.querySelectorAll('[data-to]').forEach((x) => { x.disabled = false; }); }
+        }));
+      });
+    }));
     main.querySelectorAll('[data-wd-keep]').forEach((b) => b.addEventListener('click', () => resolve(b.dataset.wdKeep, false)));
     // Média / Totalizador (oficiais): redesenha só os times, sem recarregar a página
     main.querySelectorAll('[data-agg]').forEach((b) => b.addEventListener('click', () => {
