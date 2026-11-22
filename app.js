@@ -767,6 +767,13 @@
     const canActAsDemo = (acct) => acct === state.user?.id
       || (ACTIVE_ROLES.includes(profile(state.user?.id)?.role)
           && db.pilots.some((p) => p.account_id === acct && p.pilot_id === state.user.id && p.status === 'approved'));
+    // Igual ao gatilho do banco (rsvp_perfil_atual.sql): quem muda classe ou atributos tem a "foto" da resposta
+    // atualizada nos eventos que ainda não começaram; nos que já começaram fica o que estava
+    const followProfile = (p) => {
+      const now = Date.now();
+      db.rsvps.filter((r) => r.user_id === p.id && r.going && Date.parse(db.events.find((e) => e.id === r.event_id)?.starts_at || 0) > now)
+        .forEach((r) => Object.assign(r, pick(p, BUILD_KEYS)));
+    };
 
     // Simula as regras do banco: membro comum só recebe os times e presenças das contas que controla
     const attach = (e) => {
@@ -917,6 +924,7 @@
         tracked.filter((k) => k in fields).forEach((k) => { if ((p[k] ?? null) !== (fields[k] ?? null)) changes[k] = [p[k] ?? null, fields[k] ?? null]; });
         if (Object.keys(changes).length) db.history.push({ id: db.history.length + 1, user_id: p.id, changed_at: new Date().toISOString(), changes });
         Object.assign(p, fields);
+        followProfile(p);
         if (phone !== undefined) {
           db.contacts = db.contacts.filter((c) => c.user_id !== state.user.id);
           db.contacts.push({ user_id: state.user.id, phone: phone || null });
@@ -1146,6 +1154,7 @@
       async saveBuild(accountId, build) {
         if (!canActAsDemo(accountId)) throw new Error('Você não pode alterar esta conta');
         Object.assign(profile(accountId), build);
+        followProfile(profile(accountId));
       },
       async createPilotedAccount(gameName, b) {
         if (!isMember()) throw new Error('Só membros aprovados podem cadastrar contas pilotadas');
@@ -1238,6 +1247,7 @@
         const now = new Date().toISOString();
         db.history.push({ id: db.history.length + 1, user_id: p.id, changed_by: state.user.id, changed_at: now, changes });
         Object.assign(p, pick(b, BUILD_KEYS));
+        followProfile(p);
         if (p.id !== state.user.id) db.notices.push({ id: db.notices.length + 1, user_id: p.id, kind: 'build_changed', changes, created_by: state.user.id, created_at: now, seen_at: null });
       },
       async myNotices(ids) { return db.notices.filter((n) => !n.seen_at && ids.includes(n.user_id)).map((n) => ({ ...n })); },
