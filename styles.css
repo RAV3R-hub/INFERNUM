@@ -548,6 +548,12 @@ h1 { background: linear-gradient(180deg, #fff1da, #e3b878); -webkit-background-c
 .cmp-legend { display: flex; gap: 14px; color: var(--muted); margin: -4px 0 8px; }
 .cmp-scope { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 16px; margin-top: 12px; }
 .cmp-scope .radio { margin: 0; }
+.ms-card { max-width: 720px; }
+.ms-row { border-top: 1px solid var(--border); padding: 12px 0; }
+.ms-row .ms-main { margin: 0; font-weight: 600; }
+.ms-dc { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 18px; margin: 8px 0 0 26px; }
+.ms-dc .radio { margin: 0; }
+.ms-dc[hidden] { display: none; }
 .lg { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 5px; vertical-align: -1px; }
 .lg.me, .cmp-track .me { background: linear-gradient(90deg, var(--accent), var(--ember)); }
 .lg.clan, .cmp-track .clan { background: #6b5a4c; }

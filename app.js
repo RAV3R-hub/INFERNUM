@@ -178,6 +178,15 @@
       async badges() { return ok(await sb.rpc('member_badges')) || []; },
       // Ausências: a pessoa, quem pilota a conta e a liderança veem (com o motivo)
       async absences() { return ok(await sb.from('absences').select('*').order('starts_on', { ascending: false }).limit(500)); },
+      // Configurações do membro (null = SQL ainda não rodado)
+      async memberSettings(userId) {
+        const r = await sb.from('member_settings').select('*').eq('user_id', userId).maybeSingle();
+        return r.error ? null : r.data || { user_id: userId, auto_war: false, auto_war_discord: null, auto_vigil: false, auto_vigil_discord: null };
+      },
+      async saveMemberSettings(userId, o) {
+        return ok(await sb.rpc('save_member_settings', { p_user: userId, p_war: !!o.auto_war, p_war_discord: o.auto_war_discord ?? null,
+          p_vigil: !!o.auto_vigil, p_vigil_discord: o.auto_vigil_discord ?? null }));
+      },
       async saveAbsence(userId, start, end, reason) { return ok(await sb.rpc('save_absence', { p_user: userId, p_start: start, p_end: end, p_reason: reason })); },
       async deleteAbsence(id) { ok(await sb.rpc('delete_absence', { p_id: id })); },
       // Pedidos para sair do clã (a pessoa, quem pilota a conta e a liderança veem)
@@ -806,6 +815,27 @@
       });
       return n;
     }
+    // Confirmação automática (Guerras / Vigílias), igual ao banco: só eventos futuros sem resposta e sem ausência
+    db.memberSettings = {};
+    function applyAutoDemo(uid, events = db.events, isNew = false) {
+      const s = db.memberSettings[uid];
+      const p = profile(uid);
+      if (!s || !(s.auto_war || s.auto_vigil) || !p || !ACTIVE_ROLES.includes(p.role)) return 0;
+      // Resposta do Discord para o tipo do evento, ou null quando a conta não quer confirmar esse tipo
+      const dcFor = (e) => {
+        const t = norm(db.types.find((x) => x.id === e.type_id)?.name);
+        return s.auto_war && t.includes('guerra') ? s.auto_war_discord : s.auto_vigil && /vig.lia/.test(t) ? s.auto_vigil_discord : null;
+      };
+      let n = 0;
+      events.filter((e) => Date.parse(e.starts_at) > Date.now() && dcFor(e) != null
+        && (isNew || !e.rsvp_close_minutes || Date.parse(e.starts_at) - e.rsvp_close_minutes * 60000 > Date.now())
+        && !db.rsvps.some((r) => r.event_id === e.id && r.user_id === uid)
+        && !db.absences.some((a) => a.user_id === uid && absenceCovers(a, e))).forEach((e) => {
+        db.rsvps.push({ event_id: e.id, user_id: uid, going: true, discord: dcFor(e), auto: true, answered_by: null, ...pick(p, BUILD_KEYS) });
+        n++;
+      });
+      return n;
+    }
     // Exemplo: Trovão está viajando
     {
       const a = { id: db.nextId++, user_id: 'u5', starts_on: localDay(new Date(Date.now() - 2 * 86400000)), ends_on: localDay(new Date(Date.now() + 9 * 86400000)), reason: 'Viagem a trabalho, sem internet boa', created_by: 'u5', created_at: new Date().toISOString() };
@@ -907,8 +937,19 @@
         return rows.map((r) => {
           const e = { id: db.nextId++, team_format: null, team_count: 10, ...r }; db.events.push(e); elog(e.id, 'created');
           db.absences.forEach((a) => applyAbsenceDemo(a, [e]));
+          Object.keys(db.memberSettings).forEach((uid) => applyAutoDemo(uid, [e], true));
           return { id: e.id };
         });
+      },
+      async memberSettings(userId) {
+        if (!(canActAsDemo(userId) || isOfficer())) return null;
+        return { user_id: userId, auto_war: false, auto_war_discord: null, auto_vigil: false, auto_vigil_discord: null, ...(db.memberSettings[userId] || {}) };
+      },
+      async saveMemberSettings(userId, o) {
+        if (!canActAsDemo(userId)) throw new Error('Você não pode mudar as configurações desta conta');
+        if ((o.auto_war && o.auto_war_discord == null) || (o.auto_vigil && o.auto_vigil_discord == null)) throw new Error('Diga se vai estar no Discord em cada tipo de evento marcado');
+        db.memberSettings[userId] = { auto_war: !!o.auto_war, auto_war_discord: o.auto_war_discord ?? null, auto_vigil: !!o.auto_vigil, auto_vigil_discord: o.auto_vigil_discord ?? null };
+        return applyAutoDemo(userId);
       },
       async absences() { return db.absences.filter((a) => isOfficer() || canActAsDemo(a.user_id)).map((a) => ({ ...a })); },
       async saveAbsence(userId, start, end, reason) {
@@ -1127,7 +1168,7 @@
         if (!canActAsDemo(acct)) throw new Error('Você não pode responder por esta conta');
         let r = db.rsvps.find((x) => x.event_id === eventId && x.user_id === acct);
         if (!r) { r = { event_id: eventId, user_id: acct }; db.rsvps.push(r); }
-        Object.assign(r, { going, answered_by: state.user.id }, build || {});
+        Object.assign(r, { going, answered_by: state.user.id, auto: false }, build || {});
         if (going) r.absence_id = null;
         if (!going) dropSlot(eventId, acct);
       },
@@ -2659,7 +2700,7 @@
       ? `<ul class="people">${arr.map((x) => {
         // Quando um piloto respondeu pela conta, mostra quem foi
         const by = x.r?.answered_by && x.r.answered_by !== x.p.id ? memberById(x.r.answered_by) : null;
-        const note = x.r?.absence_id && !x.r.going ? '✈️ ausência programada' : by ? `respondido por ${displayName(by)}` : '';
+        const note = x.r?.absence_id && !x.r.going ? '✈️ ausência programada' : x.r?.auto && x.r.going ? '🤖 confirmação automática' : by ? `respondido por ${displayName(by)}` : '';
         return personLine(x.p, withClass ? buildFor(x.r, x.p) : null, withClass && x.r?.discord, note);
       }).join('')}</ul>`
       : '<p class="muted small">Ninguém</p>');
@@ -3512,6 +3553,67 @@
     && (isLeader() || (can('member_alias') && (m.id === state.user.id || ['pending', 'member', 'former'].includes(m.role))));
   // Texto usado nas buscas de membros (sem acentos e sem maiúsculas)
   const memberSearchText = (m, extra = []) => norm([displayName(m), m.discord_name, m.alias, ...extra].filter(Boolean).join(' '));
+  // ---------- Minhas configurações (a minha conta ou uma conta que eu pilote) ----------
+  const AUTO_TYPES = [
+    { key: 'war', label: '⚔️ Guerras das Sombras' },
+    { key: 'vigil', label: '🌙 Vigílias' },
+  ];
+  async function viewMySettings(accountId) {
+    const id = accountId || state.user.id;
+    const accs = myAccounts();
+    const acc = accs.find((a) => a.id === id);
+    if (!acc) { location.hash = '#/minhas-configuracoes'; return; }
+    loading();
+    const self = id === state.user.id;
+    const s = await api.memberSettings(id);
+    const back = self ? '<a href="#/perfil" class="small">← Meu perfil</a>' : `<a href="#/membro/${encodeURIComponent(id)}" class="small">← Perfil de ${esc(displayName(acc))}</a>`;
+    const picker = accs.length > 1 ? `<select class="inline" id="ms-acc" aria-label="Conta">
+        ${accs.map((a) => `<option value="${esc(a.id)}" ${a.id === id ? 'selected' : ''}>${esc(displayName(a))}${a.id === state.user.id ? ' (você)' : ''}</option>`).join('')}
+      </select>` : '';
+    const head = `<p>${back}</p><div class="page-head"><h1>${self ? 'Minhas configurações' : 'Configurações da conta'}</h1>${picker}</div>`;
+    const bindPicker = () => $('#ms-acc')?.addEventListener('change', (e) => {
+      location.hash = e.target.value === state.user.id ? '#/minhas-configuracoes' : `#/minhas-configuracoes/${encodeURIComponent(e.target.value)}`;
+    });
+    if (!s) {
+      main.innerHTML = `${head}<div class="card empty">As configurações ainda não estão ativas no banco. Rode o arquivo <code>supabase/configuracoes_membro.sql</code> no Supabase.</div>`;
+      bindPicker(); return;
+    }
+    const dcOpt = (k, v, label) => `<label class="radio"><input type="radio" name="ms-${k}-dc" value="${v ? 1 : 0}" ${s[`auto_${k}_discord`] === v ? 'checked' : ''}> ${label}</label>`;
+    main.innerHTML = `${head}
+      <form class="card ms-card" id="ms">
+        <h2>✅ Confirmar presença automaticamente</h2>
+        ${AUTO_TYPES.map((t) => `<div class="ms-row">
+          <label class="radio ms-main"><input type="checkbox" id="ms-${t.key}" ${s[`auto_${t.key}`] ? 'checked' : ''}> ${t.label}</label>
+          <div class="ms-dc" id="ms-${t.key}-dc" ${s[`auto_${t.key}`] ? '' : 'hidden'}>
+            <span class="muted small">Nesses eventos:</span>
+            ${dcOpt(t.key, true, '🎧 Vou estar no Discord')}
+            ${dcOpt(t.key, false, 'Não vou usar o Discord')}
+          </div>
+        </div>`).join('')}
+        <div class="row end"><button type="submit" class="btn primary">Salvar</button></div>
+      </form>`;
+    bindPicker();
+    AUTO_TYPES.forEach((t) => $(`#ms-${t.key}`).addEventListener('change', (e) => { $(`#ms-${t.key}-dc`).hidden = !e.target.checked; }));
+    $('#ms').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const o = {};
+      for (const t of AUTO_TYPES) {
+        const on = $(`#ms-${t.key}`).checked;
+        const dc = $(`input[name="ms-${t.key}-dc"]:checked`);
+        if (on && !dc) { toast(`${t.label.replace(/^\S+\s/, '')}: diga se vai estar no Discord`, true); return; }
+        o[`auto_${t.key}`] = on;
+        o[`auto_${t.key}_discord`] = dc ? dc.value === '1' : null;
+      }
+      const btn = e.submitter || $('#ms button[type=submit]');
+      btn.disabled = true;
+      try {
+        const n = await api.saveMemberSettings(id, o);
+        toast(n ? `Configurações salvas · presença confirmada em ${n} ${n === 1 ? 'evento já agendado' : 'eventos já agendados'}` : 'Configurações salvas');
+      } catch (err) { fail(err); }
+      btn.disabled = false;
+    });
+  }
+
   function openAliasDialog(m, after) {
     openDialog(`<form id="al" class="stack">
       <h2>🏷️ Codinome</h2>
@@ -4606,8 +4708,8 @@
             <div class="muted small">${me.game_name ? `${esc(me.discord_name)} · ` : ''}${ROLE_LABEL[me.role]}${me.created_at ? ` · no clã desde ${new Date(me.created_at).toLocaleDateString('pt-BR')}` : ''}${phone ? ` · <a href="tel:${esc(phone.replace(/[^\d+]/g, ''))}">📞 ${esc(phone)}</a>` : ''}</div>
             ${me.char_class ? `<div class="member-build">${classTag(me.char_class)} <span>${esc(CLASS[me.char_class].label)}</span><span class="chip-stats">${statsLine(me)}</span></div>` : ''}
           </div>
-          ${self ? `<div class="row me-actions"><button class="btn small" id="btn-photo-pf">📷 ${me.custom_avatar_url ? 'Trocar foto' : 'Enviar foto'}</button><button class="btn small" id="btn-edit-pf">✎ Editar perfil</button>${canAlias(me) ? '<button class="btn small" id="btn-alias">🏷️ Codinome</button>' : ''}</div>`
-            : canRename(me) || canAlias(me) ? `<div class="row me-actions">${canRename(me) ? '<button class="btn small" id="btn-rename">✎ Editar nick</button>' : ''}${canAlias(me) ? '<button class="btn small" id="btn-alias">🏷️ Codinome</button>' : ''}</div>` : ''}
+          ${self ? `<div class="row me-actions"><button class="btn small" id="btn-photo-pf">📷 ${me.custom_avatar_url ? 'Trocar foto' : 'Enviar foto'}</button><button class="btn small" id="btn-edit-pf">✎ Editar perfil</button>${ACTIVE_ROLES.includes(me.role) ? '<a class="btn small" href="#/minhas-configuracoes">⚙️ Minhas configurações</a>' : ''}${canAlias(me) ? '<button class="btn small" id="btn-alias">🏷️ Codinome</button>' : ''}</div>`
+            : canRename(me) || canAlias(me) || (canActAs(me.id) && ACTIVE_ROLES.includes(me.role)) ? `<div class="row me-actions">${canActAs(me.id) && ACTIVE_ROLES.includes(me.role) ? `<a class="btn small" href="#/minhas-configuracoes/${encodeURIComponent(me.id)}">⚙️ Configurações</a>` : ''}${canRename(me) ? '<button class="btn small" id="btn-rename">✎ Editar nick</button>' : ''}${canAlias(me) ? '<button class="btn small" id="btn-alias">🏷️ Codinome</button>' : ''}</div>` : ''}
         </div>
       </div>
 
@@ -7101,20 +7203,21 @@
     const ev = h.match(/^\/evento\/(\d+)$/);
     const tm = h.match(/^\/evento\/(\d+)\/times$/);
     const mp = h.match(/^\/membro\/([\w%-]+)$/); // perfil de um membro (oficiais e líder)
+    const ms = h.match(/^\/minhas-configuracoes(?:\/([\w%-]+))?$/); // configurações da conta (minha ou pilotada)
     const rc = RECRUIT_ON ? h.match(/^\/recrutamento\/(\d+)$/) : null;
     const tk = TICKETS_ON ? h.match(/^\/ticket\/(\d+)$/) : null;
     const key = h === '/passados' ? 'past' : h === '/frequencia' ? 'freq' : h === '/estatisticas' ? 'panel' : h === '/rivais' ? 'rivals' : h === '/news' ? 'news' : h === '/utils' ? 'utils'
       : h === '/config' ? 'config' : h === '/solicitacoes' ? 'requests'
       : RECRUIT_ON && h === '/recrutamentos' ? 'recruits' : rc ? 'recruits'
       : TICKETS_ON && h === '/tickets' ? 'tickets' : TICKETS_ON && h === '/atendimento' ? 'support' : tk ? 'ticket'
-      : h === '/perfil' ? 'profile' : h === '/membros' ? (isOfficer() ? 'members' : 'profile') : mp ? 'members'
+      : h === '/perfil' || ms ? 'profile' : h === '/membros' ? (isOfficer() ? 'members' : 'profile') : mp ? 'members'
       : tm ? 'teams' : ev ? 'event' : 'upcoming';
-    return { ev, tm, mp, rc, tk, key };
+    return { ev, tm, mp, ms, rc, tk, key };
   }
   const currentRouteKey = () => parseRoute().key;
 
   async function route() {
-    const { ev, tm, mp, rc, tk, key } = parseRoute();
+    const { ev, tm, mp, ms, rc, tk, key } = parseRoute();
     if (state.user && isOfficer()) await loadPerms();
     if (state.user && isMember()) await Promise.all([loadRecruits(), loadTickets(), loadBell(), loadBadges(), loadLeaves()]);
     bellOpen = false;
@@ -7135,6 +7238,7 @@
       else if (key === 'support') await viewSupport();
       else if (key === 'recruits') await viewRecruits();
       else if (mp) await viewMyPanel(decodeURIComponent(mp[1]));
+      else if (ms) await viewMySettings(ms[1] ? decodeURIComponent(ms[1]) : null);
       else if (key === 'profile') await viewMyPanel();
       else if (key === 'members') await viewMembers();
       else if (key === 'freq') await viewFrequency();
