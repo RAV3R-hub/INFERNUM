@@ -7,3 +7,6 @@ Thumbs.db
 # Skills instaladas com "npx skills add" (só no computador, não vão para o site)
 .agents/
 skills-lock.json
+
+# Grafo do graphify (só no computador, não vai para o site)
+graphify-out/
