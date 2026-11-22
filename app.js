@@ -1795,9 +1795,12 @@
   }
 
   const dlg = $('#dlg');
+  const TOUCH = window.matchMedia?.('(pointer: coarse)').matches ?? false; // celular/tablet
   function openDialog(html, onReady) {
-    dlg.innerHTML = html;
+    dlg.innerHTML = `<button type="button" class="dlg-x" data-close aria-label="Fechar">✕</button>${html}`;
     if (!dlg.open) dlg.showModal();
+    // No celular, não abre o teclado nem o calendário sozinho: o navegador foca o primeiro campo ao abrir
+    if (TOUCH && dlg.contains(document.activeElement)) document.activeElement.blur();
     dlg.querySelectorAll('[data-close]').forEach((b) => b.addEventListener('click', () => dlg.close()));
     onReady?.(dlg);
   }
@@ -1887,6 +1890,9 @@
       if (!isLeader() && isOfficer()) links.push(['#/solicitacoes', 'Solicitações', 'requests']);
       // Os contadores ficam no sininho (ao lado da foto), não no menu
       nav.innerHTML = links.map(([href, label, key]) => `<a href="${href}" class="${currentKey === key ? 'active' : ''}">${label}</a>`).join('');
+      // No celular o menu desliza para o lado: deixa a aba atual à vista
+      const act = nav.querySelector("a.active");
+      if (act && nav.scrollWidth > nav.clientWidth) nav.scrollLeft = act.offsetLeft - (nav.clientWidth - act.offsetWidth) / 2;
     } else nav.innerHTML = '';
 
     const box = $('#userbox');
@@ -7416,8 +7422,19 @@
       return;
     }
     lastHash = location.hash;
+    window.scrollTo(0, 0); // página nova começa do topo
     route();
   });
+  // Celular: o botão de atendimento some ao rolar para baixo e volta ao rolar para cima
+  {
+    let lastY = window.scrollY;
+    window.addEventListener("scroll", () => {
+      const y = window.scrollY;
+      if (Math.abs(y - lastY) < 8) return;
+      document.body.classList.toggle("scroll-down", y > lastY && y > 120);
+      lastY = y;
+    }, { passive: true });
+  }
   window.addEventListener('beforeunload', (e) => {
     if (onTeamsPage(location.hash) && teamsDirty()) { e.preventDefault(); e.returnValue = ''; }
   });
