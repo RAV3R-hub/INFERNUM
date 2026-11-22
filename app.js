@@ -1847,34 +1847,66 @@
 
   // Só o líder altera classe e atributos de outras contas (o dono da conta é avisado)
   const canLeaderBuild = (m) => isLeader() && !!m && m.id !== state.user.id && m.role !== 'former';
-  function openLeaderBuild(m, after) {
+  // Um só botão "✎ Editar" (perfil e lista de membros): nick, codinome e, só para o líder, classe e atributos
+  const canEditMember = (m) => canRename(m) || canAlias(m) || canLeaderBuild(m);
+  function openMemberEdit(m, after) {
     const name = esc(displayName(m));
+    const rn = canRename(m);
+    const al = canAlias(m);
+    const lb = canLeaderBuild(m);
+    const who = m.managed ? 'Quem pilota esta conta' : `<b>${name}</b>`;
     openDialog(`
-      <form id="lb-form" class="stack">
-        <h2>Editar atributos · ${name}</h2>
-        <p class="small" style="margin:0">Alterar a classe e os atributos desta conta. Só o líder pode fazer isso.</p>
-        ${buildFields(pick(m, BUILD_KEYS), true)}
-        <p class="lb-warn small" style="margin:0">⚠️ ${m.managed ? 'Quem pilota esta conta' : `<b>${name}</b>`} vai receber o aviso: “Seus atributos foram alterados pela liderança, entrar em contato com a staff.” A alteração fica no histórico do perfil.</p>
+      <form id="me-form" class="stack">
+        <h2>Editar · ${name}</h2>
+        ${rn ? `<div class="field">
+          <label for="me-nick">Nick / nome do personagem</label>
+          <input id="me-nick" maxlength="40" required value="${esc(m.game_name || '')}" placeholder="${esc(m.discord_name || 'Nome no jogo')}">
+          <small class="muted">Nome que aparece no site${m.discord_name ? ` (Discord: ${esc(m.discord_name)})` : ''}.</small>
+        </div>` : ''}
+        ${al ? `<div class="field">
+          <label for="me-alias">🏷️ Codinome</label>
+          <input id="me-alias" maxlength="40" value="${esc(m.alias || '')}" placeholder="Ex.: Lua Azul" autocomplete="off">
+          <small class="muted">Nome simplificado só para as buscas (nick com símbolos ou letras chinesas). Não aparece no site.</small>
+        </div>` : ''}
+        ${lb ? `${buildFields(pick(m, BUILD_KEYS), false)}
+          <p class="lb-warn small" style="margin:0">⚠️ Classe e atributos: só o líder altera. Se mudar algum, ${who} recebe o aviso “Seus atributos foram alterados pela liderança, entrar em contato com a staff.”</p>` : ''}
+        <p class="muted small" style="margin:0">As alterações ficam no histórico do membro, com o seu nome.</p>
         <div class="row end">
           <button type="button" class="btn ghost" data-close>Cancelar</button>
-          <button type="submit" class="btn primary">Salvar e avisar</button>
+          <button type="submit" class="btn primary">Salvar</button>
         </div>
       </form>`, (d) => {
-      $('#lb-form', d).addEventListener('submit', async (e) => {
+      $('#me-form', d).addEventListener('submit', async (e) => {
         e.preventDefault();
         const submit = $('button[type=submit]', d);
-        const b = readBuild(d);
-        if (BUILD_KEYS.every((k) => (m[k] ?? null) === (b[k] ?? null))) { toast('Nada foi alterado'); return; }
+        const nick = rn ? $('#me-nick', d).value.trim() : null;
+        const alias = al ? $('#me-alias', d).value.trim() : null;
+        const b = lb ? readBuild(d) : null;
+        if (rn && !nick) { toast('Escreva o nick', true); return; }
+        const nickCh = rn && nick !== (m.game_name || '');
+        const aliasCh = al && alias !== (m.alias || '');
+        const buildCh = lb && BUILD_KEYS.some((k) => (m[k] ?? null) !== (b[k] ?? null));
+        if (!nickCh && !aliasCh && !buildCh) { dlg.close(); return; }
         submit.disabled = true;
+        const done = [];
         try {
-          await api.leaderSetBuild(m.id, b);
-          const mm = memberById(m.id);
-          if (mm) Object.assign(mm, b);
-          Object.assign(m, b);
+          if (nickCh) { await api.renameMember(m.id, nick); m.game_name = nick; done.push('nick'); }
+          if (aliasCh) { await api.setAlias(m.id, alias); m.alias = alias || null; done.push('codinome'); }
+          if (buildCh) {
+            await api.leaderSetBuild(m.id, b);
+            const mm = memberById(m.id);
+            if (mm) Object.assign(mm, b);
+            Object.assign(m, b);
+            done.push('atributos');
+          }
           dlg.close();
-          toast(`Atributos de ${displayName(m)} alterados. ${m.managed ? 'Quem pilota a conta' : 'O membro'} foi avisado.`);
-          await after();
-        } catch (err) { fail(err); submit.disabled = false; }
+          const what = done.length > 1 ? `${done.slice(0, -1).join(', ')} e ${done.at(-1)}` : done[0];
+          toast(`${what[0].toUpperCase()}${what.slice(1)} de ${displayName(m)} ${done.length > 1 || done[0] === 'atributos' ? 'salvos' : 'salvo'}.${buildCh ? ` ${m.managed ? 'Quem pilota a conta' : 'O membro'} foi avisado.` : ''}`);
+          await after?.();
+        } catch (err) {
+          fail(err); submit.disabled = false;
+          if (done.length) await after?.(); // o que já foi salvo aparece na tela
+        }
       });
     });
   }
@@ -3623,38 +3655,6 @@
   // Oficial: membros, quem aguarda aprovação e ex-membros. Líder: qualquer um. O próprio nick: em "Editar perfil".
   const canRename = (m) => !!m && m.id !== state.user.id
     && (isLeader() || (can('member_rename') && ['pending', 'member', 'former'].includes(m.role)));
-  function openRenameDialog(m, after) {
-    openDialog(`<form id="rn" class="stack">
-      <h2>Editar nick</h2>
-      <p class="muted small" style="margin:0">Nome que aparece no site para <b>${esc(displayName(m))}</b>${m.discord_name ? ` (Discord: ${esc(m.discord_name)})` : ''}.
-        A troca fica no histórico do membro, com o seu nome.</p>
-      <div class="field">
-        <label for="rn-name">Nick / nome do personagem</label>
-        <input id="rn-name" maxlength="40" required value="${esc(m.game_name || '')}" placeholder="${esc(m.discord_name || 'Nome no jogo')}">
-      </div>
-      <div class="row end">
-        <button type="button" class="btn ghost" data-close>Cancelar</button>
-        <button type="submit" class="btn primary">Salvar</button>
-      </div>
-    </form>`, (d) => {
-      const input = $('#rn-name', d);
-      input.focus(); input.select();
-      $('#rn', d).addEventListener('submit', async (e) => {
-        e.preventDefault();
-        const name = input.value.trim();
-        if (!name) { toast('Escreva o nick', true); return; }
-        if (name === (m.game_name || '')) { dlg.close(); return; }
-        const btn = $('button[type=submit]', d);
-        btn.disabled = true;
-        try {
-          await api.renameMember(m.id, name);
-          dlg.close();
-          toast(`Nick alterado para “${name}”`);
-          await after?.();
-        } catch (err) { fail(err); btn.disabled = false; }
-      });
-    });
-  }
 
   // ---------- Codinome (oficiais e líder) ----------
   // Nome simplificado só para as buscas. Oficial: o próprio e o de membros, de quem aguarda aprovação e ex-membros.
@@ -4925,7 +4925,7 @@
             ${me.char_class ? `<div class="member-build">${classTag(me.char_class)}${CLASS[me.char_class].label !== CLASS[me.char_class].short ? ` <span>${esc(CLASS[me.char_class].label)}</span>` : ''}<span class="chip-stats">${statsLine(me)}</span></div>` : ''}
           </div>
           ${self ? `<div class="row me-actions"><button class="btn small" id="btn-photo-pf">📷 ${me.custom_avatar_url ? 'Trocar foto' : 'Enviar foto'}</button><button class="btn small" id="btn-edit-pf">✎ Editar perfil</button>${ACTIVE_ROLES.includes(me.role) ? '<a class="btn small" href="#/minhas-configuracoes">⚙️ Minhas configurações</a>' : ''}${canAlias(me) ? '<button class="btn small" id="btn-alias">🏷️ Codinome</button>' : ''}</div>`
-            : canRename(me) || canAlias(me) || canLeaderBuild(me) || (canActAs(me.id) && ACTIVE_ROLES.includes(me.role)) ? `<div class="row me-actions">${canLeaderBuild(me) ? '<button class="btn small" id="btn-lead-build" title="Só o líder: alterar classe e atributos desta conta">✎ Editar atributos</button>' : ''}${canActAs(me.id) && ACTIVE_ROLES.includes(me.role) ? `<a class="btn small" href="#/minhas-configuracoes/${encodeURIComponent(me.id)}">⚙️ Configurações</a>` : ''}${canRename(me) ? '<button class="btn small" id="btn-rename">✎ Editar nick</button>' : ''}${canAlias(me) ? '<button class="btn small" id="btn-alias">🏷️ Codinome</button>' : ''}</div>` : ''}
+            : canEditMember(me) || (canActAs(me.id) && ACTIVE_ROLES.includes(me.role)) ? `<div class="row me-actions">${canEditMember(me) ? '<button class="btn small" id="btn-edit-member" title="Editar nick, codinome e atributos">✎ Editar</button>' : ''}${canActAs(me.id) && ACTIVE_ROLES.includes(me.role) ? `<a class="btn small" href="#/minhas-configuracoes/${encodeURIComponent(me.id)}">⚙️ Configurações</a>` : ''}</div>` : ''}
         </div>
       </div>
 
@@ -4973,8 +4973,7 @@
         finally { if (document.body.contains(btn)) { btn.disabled = false; btn.textContent = label; } }
       });
     });
-    $('#btn-rename')?.addEventListener('click', () => openRenameDialog(me, () => viewMyPanel(userId)));
-    $('#btn-lead-build')?.addEventListener('click', () => openLeaderBuild(me, () => viewMyPanel(userId)));
+    $('#btn-edit-member')?.addEventListener('click', () => openMemberEdit(me, () => viewMyPanel(userId)));
     $('#btn-alias')?.addEventListener('click', () => openAliasDialog(me, () => viewMyPanel(userId)));
     $('#btn-pr-fill')?.addEventListener('click', openProfile);
     $('#btn-pr-info')?.addEventListener('click', () => openPowerInfo(me));
@@ -6871,7 +6870,7 @@
       <div class="name"><a class="member-link" href="#/membro/${encodeURIComponent(m.id)}">${esc(displayName(m))}</a>${medalsHtml(m.id)} ${absTag(m)} ${noteBadge(m)} ${pilotLabel(m)} ${formerly(m)}
         <small>${m.managed ? 'conta sem login' : (m.game_name ? esc(m.discord_name) : '')} ${phoneLink(m)}</small>
         ${m.char_class ? `<div class="member-build">${classTag(m.char_class)}${CLASS[m.char_class].label !== CLASS[m.char_class].short ? ` <span>${esc(CLASS[m.char_class].label)}</span>` : ''}<span class="chip-stats">${statsLine(m)}</span></div>` : '<div class="member-build muted small">Classe e atributos não informados</div>'}
-      </div>${canRename(m) ? `<button class="btn small ghost" data-rename="${esc(m.id)}" title="Editar o nick de ${esc(displayName(m))}">✎ Nick</button>` : ''}${canAlias(m) ? `<button class="btn small ghost" data-alias="${esc(m.id)}" title="${m.alias ? `Codinome: ${esc(m.alias)}` : `Dar um codinome para ${esc(displayName(m))}`}">🏷️ Codinome</button>` : ''}${histBtn(m)}${ctrl}</div>`;
+      </div>${canEditMember(m) ? `<button class="btn small ghost" data-edit-member="${esc(m.id)}" title="Editar nick, codinome e atributos de ${esc(displayName(m))}">✎ Editar</button>` : ''}${histBtn(m)}${ctrl}</div>`;
 
     main.innerHTML = `
       <div class="page-head"><h1>Membros</h1><span class="muted">${active.length} ativos</span>
@@ -6955,14 +6954,10 @@
     main.querySelectorAll('[data-history]').forEach((b) => b.addEventListener('click', () => {
       openHistory(state.members.find((x) => x.id === b.dataset.history), histBy[b.dataset.history] || []);
     }));
-    main.querySelectorAll('[data-rename]').forEach((b) => b.addEventListener('click', () => {
-      const m = [...pending, ...active, ...former].find((x) => x.id === b.dataset.rename);
-      if (m) openRenameDialog(m, () => viewMembers());
-    }));
-    main.querySelectorAll('[data-alias]').forEach((b) => b.addEventListener('click', (e) => {
+    main.querySelectorAll('[data-edit-member]').forEach((b) => b.addEventListener('click', (e) => {
       e.stopPropagation();
-      const m = [...pending, ...active, ...former].find((x) => x.id === b.dataset.alias);
-      if (m) openAliasDialog(m, () => viewMembers());
+      const m = [...pending, ...active, ...former].find((x) => x.id === b.dataset.editMember);
+      if (m) openMemberEdit(m, () => viewMembers());
     }));
     $('#btn-csv')?.addEventListener('click', async (e) => {
       e.target.disabled = true;
