@@ -1804,10 +1804,12 @@
     dlg.querySelectorAll('[data-close]').forEach((b) => b.addEventListener('click', () => dlg.close()));
     onReady?.(dlg);
   }
-  function confirmDialog(text, okLabel = 'Confirmar') {
+  function confirmDialog(text, okLabel = 'Confirmar') { return confirmDialogHtml(`<p>${esc(text)}</p>`, okLabel); }
+  // Igual ao confirmDialog, com conteúdo HTML já montado (e escapado) por quem chama
+  function confirmDialogHtml(html, okLabel = 'Confirmar') {
     return new Promise((resolve) => {
       let answered = false;
-      openDialog(`<p>${esc(text)}</p><div class="row end"><button class="btn ghost" data-close>Cancelar</button><button class="btn primary" id="ok">${esc(okLabel)}</button></div>`, (d) => {
+      openDialog(`${html}<div class="row end"><button class="btn ghost" data-close>Cancelar</button><button class="btn primary" id="ok">${esc(okLabel)}</button></div>`, (d) => {
         $('#ok', d).addEventListener('click', () => { answered = true; dlg.close(); resolve(true); });
         dlg.addEventListener('close', () => { if (!answered) resolve(false); }, { once: true });
       });
@@ -3635,7 +3637,7 @@
     const autoCell = (t) => `<div class="ms-cell">
         <span class="ms-cell-head">✅ Presença automática</span>
         <label class="radio"><input type="checkbox" id="ms-${t.key}" ${s[`auto_${t.key}`] ? 'checked' : ''}> Confirmar</label>
-        <div class="ms-dc" id="ms-${t.key}-dc" ${s[`auto_${t.key}`] ? '' : 'hidden'}>${dcOpt(t.key, true, '🎧 Com Discord')}${dcOpt(t.key, false, 'Sem Discord')}</div>
+        <div class="ms-dc${s[`auto_${t.key}`] ? '' : ' off'}" id="ms-${t.key}-dc">${dcOpt(t.key, true, '🎧 Com Discord')}${dcOpt(t.key, false, 'Sem Discord')}</div>
       </div>`;
     const calCell = (t) => (cal ? `<div class="ms-cell">
         <span class="ms-cell-head">📅 Lembrete na agenda</span>
@@ -3658,7 +3660,7 @@
       </form>`;
     bindPicker();
     AUTO_TYPES.forEach((t) => {
-      $(`#ms-${t.key}`).addEventListener('change', (e) => { $(`#ms-${t.key}-dc`).hidden = !e.target.checked; });
+      $(`#ms-${t.key}`).addEventListener('change', (e) => { $(`#ms-${t.key}-dc`).classList.toggle('off', !e.target.checked); });
     });
     CAL_KEYS.forEach((t) => $(`#mc-${t.key}`)?.addEventListener('change', (e) => {
       [$(`#mc-${t.key}-alarm`), $(`#mc-${t.key}-slot`)].forEach((el) => { if (el) el.disabled = !e.target.checked; });
@@ -4034,7 +4036,7 @@
     main.innerHTML = `
       <div class="page-head"><h1>Recrutamentos</h1><button class="btn primary" id="btn-new-rc">+ Novo recrutamento</button></div>
       <p class="muted small">Procurando gente para um Grupo Guerreiro, um time PvP ou outra atividade? Crie um recrutamento: ele aparece para todos depois que um oficial ou o líder aprovar. Os candidatos aparecem com classe e atributos do perfil, e quem criou escolhe quem entra.</p>
-      <div class="seg rc-filter" role="group" aria-label="Filtrar por categoria">
+      <div class="seg rc-filter rc-cats" role="group" aria-label="Filtrar por categoria">
         <button class="${recruitFilter ? '' : 'on'}" data-rc-cat="">Todos</button>
         ${RECRUIT_CATS.map((c) => `<button class="${recruitFilter === c.key ? 'on' : ''}" data-rc-cat="${c.key}">${c.icon} ${esc(c.label)}</button>`).join('')}
       </div>
@@ -4119,8 +4121,10 @@
         if (await confirmDialog('Para se candidatar, preencha primeiro sua classe e seus atributos no perfil: é isso que quem criou o recrutamento vai ver.', 'Abrir meu perfil')) openProfile();
         return;
       }
-      const b = pick(state.me, BUILD_KEYS);
-      if (!(await confirmDialog(`Candidatar-se a “${r.title}”? Você vai aparecer como ${displayName(state.me)} · ${CLASS[b.char_class]?.label} · ${ATTRS.map((a) => `${a.short} ${fmtNum(b[a.key])}`).join(' · ')}. Se algo mudou, atualize o perfil antes.`, 'Candidatar'))) return;
+      const me = recruitPerson(state.me.id) || { id: state.me.id, name: displayName(state.me), profile: state.me, build: pick(state.me, BUILD_KEYS), discord: false };
+      if (!(await confirmDialogHtml(`<div class="stack"><h2>Candidatar-se</h2>
+        <p style="margin:0">Você vai se candidatar a <b>${esc(r.title)}</b> e aparecer assim:</p>${chip(me)}
+        <p class="muted small" style="margin:0">Se algo mudou, atualize o perfil antes.</p></div>`, 'Candidatar'))) return;
       run(() => api.applyRecruit(r.id), 'Candidatura enviada! Agora é só aguardar quem criou o recrutamento.');
     });
     $('#rc-withdraw')?.addEventListener('click', async () => {
@@ -4816,7 +4820,7 @@
           <div class="spacer">
             <div class="me-name">${esc(displayName(me))}${medalsHtml(me.id, 4)}${me.role === 'former' ? ' <span class="badge former-badge">Ex-membro</span>' : ''}</div>
             <div class="muted small">${me.game_name ? `${esc(me.discord_name)} · ` : ''}${ROLE_LABEL[me.role]}${me.created_at ? ` · no clã desde ${new Date(me.created_at).toLocaleDateString('pt-BR')}` : ''}${phone ? ` · <a href="tel:${esc(phone.replace(/[^\d+]/g, ''))}">📞 ${esc(phone)}</a>` : ''}</div>
-            ${me.char_class ? `<div class="member-build">${classTag(me.char_class)} <span>${esc(CLASS[me.char_class].label)}</span><span class="chip-stats">${statsLine(me)}</span></div>` : ''}
+            ${me.char_class ? `<div class="member-build">${classTag(me.char_class)}${CLASS[me.char_class].label !== CLASS[me.char_class].short ? ` <span>${esc(CLASS[me.char_class].label)}</span>` : ''}<span class="chip-stats">${statsLine(me)}</span></div>` : ''}
           </div>
           ${self ? `<div class="row me-actions"><button class="btn small" id="btn-photo-pf">📷 ${me.custom_avatar_url ? 'Trocar foto' : 'Enviar foto'}</button><button class="btn small" id="btn-edit-pf">✎ Editar perfil</button>${ACTIVE_ROLES.includes(me.role) ? '<a class="btn small" href="#/minhas-configuracoes">⚙️ Minhas configurações</a>' : ''}${canAlias(me) ? '<button class="btn small" id="btn-alias">🏷️ Codinome</button>' : ''}</div>`
             : canRename(me) || canAlias(me) || (canActAs(me.id) && ACTIVE_ROLES.includes(me.role)) ? `<div class="row me-actions">${canActAs(me.id) && ACTIVE_ROLES.includes(me.role) ? `<a class="btn small" href="#/minhas-configuracoes/${encodeURIComponent(me.id)}">⚙️ Configurações</a>` : ''}${canRename(me) ? '<button class="btn small" id="btn-rename">✎ Editar nick</button>' : ''}${canAlias(me) ? '<button class="btn small" id="btn-alias">🏷️ Codinome</button>' : ''}</div>` : ''}
@@ -5508,7 +5512,8 @@
 
   // opts.time: posição no eixo X pela data (p.t); opts.aria: descrição; p.tip: texto ao passar o mouse
   function lineChart(points, opts = {}) {
-    const W = 640, H = 210, L = 58, R = 16, T = 16, B = 30;
+    const narrow = window.innerWidth <= 640; // celular: desenho mais estreito, letras maiores na tela
+    const W = narrow ? 360 : 640, H = narrow ? 220 : 210, L = narrow ? 46 : 58, R = narrow ? 10 : 16, T = 16, B = 30;
     const vs = points.map((p) => p.v);
     let lo = Math.min(...vs); let hi = Math.max(...vs);
     if (hi - lo < 20) { lo -= 20; hi += 20; }
@@ -6747,7 +6752,7 @@
     const row = (m, ctrl) => `<div class="member clickable" data-search="${esc(searchText(m))}" data-profile="${esc(m.id)}" title="Abrir o perfil de ${esc(displayName(m))}">${avatar(m, 'lg')}
       <div class="name"><a class="member-link" href="#/membro/${encodeURIComponent(m.id)}">${esc(displayName(m))}</a>${medalsHtml(m.id)} ${absTag(m)} ${noteBadge(m)} ${pilotLabel(m)} ${formerly(m)}
         <small>${m.managed ? 'conta sem login' : (m.game_name ? esc(m.discord_name) : '')} ${phoneLink(m)}</small>
-        ${m.char_class ? `<div class="member-build">${classTag(m.char_class)} <span>${esc(CLASS[m.char_class].label)}</span><span class="chip-stats">${statsLine(m)}</span></div>` : '<div class="member-build muted small">Classe e atributos não informados</div>'}
+        ${m.char_class ? `<div class="member-build">${classTag(m.char_class)}${CLASS[m.char_class].label !== CLASS[m.char_class].short ? ` <span>${esc(CLASS[m.char_class].label)}</span>` : ''}<span class="chip-stats">${statsLine(m)}</span></div>` : '<div class="member-build muted small">Classe e atributos não informados</div>'}
       </div>${canRename(m) ? `<button class="btn small ghost" data-rename="${esc(m.id)}" title="Editar o nick de ${esc(displayName(m))}">✎ Nick</button>` : ''}${canAlias(m) ? `<button class="btn small ghost" data-alias="${esc(m.id)}" title="${m.alias ? `Codinome: ${esc(m.alias)}` : `Dar um codinome para ${esc(displayName(m))}`}">🏷️ Codinome</button>` : ''}${histBtn(m)}${ctrl}</div>`;
 
     main.innerHTML = `
