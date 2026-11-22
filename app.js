@@ -2039,6 +2039,8 @@
   };
 
   function viewLogin() {
+    // Saiu da conta: os avisos da conta anterior não ficam na tela de login
+    $('#bn-notice')?.remove(); $('#tk-notice')?.remove();
     // Chegou com ?code= e mesmo assim caiu no login: o Discord devolveu para outro navegador
     try { if (new URLSearchParams(location.search).has('code')) loginFailed = true; } catch { /* ignora */ }
     if (loginFailed) {
