@@ -1848,16 +1848,19 @@
   const main = $('#app');
   const loading = () => { main.innerHTML = '<div class="spinner" aria-label="Carregando"></div>'; };
 
+  let demoBannerOff = false; // demonstração: faixa escondida até recarregar a página (prints)
   function renderHeader(currentKey) {
     $('#clan-name').textContent = CFG.clanName || 'Clã';
     document.title = `${CFG.clanName || 'Clã'} · Eventos`;
     const banner = $('#demo-banner');
-    banner.hidden = !DEMO;
-    if (DEMO) {
+    banner.hidden = !DEMO || demoBannerOff;
+    if (DEMO && !demoBannerOff) {
       banner.innerHTML = `Modo demonstração: dados fictícios, nada é salvo.${state.me ? `
         <label class="demo-role">Ver como
           <select id="demo-role" class="inline">${['leader', 'officer', 'member', 'former'].map((r) => `<option value="${r}" ${state.me.role === r ? 'selected' : ''}>${ROLE_LABEL[r]}</option>`).join('')}</select>
-        </label>` : ''}`;
+        </label>` : ''}
+        <button type="button" class="demo-x" id="demo-x" title="Esconder esta faixa (para tirar prints). Volta ao recarregar a página." aria-label="Esconder a faixa da demonstração">✕</button>`;
+      $('#demo-x').addEventListener('click', () => { demoBannerOff = true; banner.hidden = true; });
       $('#demo-role')?.addEventListener('change', async (e) => {
         await api.demoSetRole(e.target.value);
         await boot();
