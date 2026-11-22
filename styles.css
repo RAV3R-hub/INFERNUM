@@ -1157,3 +1157,33 @@ body.has-fab main { padding-bottom: 90px; }
 .dialog > .dlg-x:hover { background: var(--panel-2); color: var(--text); }
 .dialog > .dlg-x + * h2:first-child, .dialog > .dlg-x + h2 { padding-right: 32px; }
 .dialog .row.end:last-child { position: sticky; bottom: -20px; z-index: 1; margin-bottom: -20px; padding: 12px 0 20px; background: var(--panel); }
+
+/* Celular: lista de eventos e detalhe do evento */
+@media (max-width: 640px) {
+  /* Resposta travada (ex.: "Sem resposta") na largura do cartão, como os botões */
+  .event .rsvp-locked { grid-column: 1 / -1; }
+  /* "Adicionar à Agenda" vira só o 📅 ao lado de "Detalhar evento": o cartão não cresce ao confirmar */
+  .ev-foot .cal-label { display: none; }
+  .ev-foot { display: flex; gap: 6px; flex-wrap: wrap; }
+  /* Detalhe: título e informações na largura toda; Vou / Não vou embaixo, grandes, sempre no mesmo lugar */
+  .ev-head { flex-direction: column; align-items: stretch; }
+  .ev-head > .actions { display: flex; gap: 6px; width: 100%; }
+  .ev-head > .actions .btn { flex: 1; min-height: 42px; }
+  .ev-head > .muted.small { text-align: left; }
+  /* Botões finais dos diálogos dividem a largura (sem um sozinho numa linha) */
+  .dialog { padding: 18px 16px; }
+  .dialog .row.end > .btn { flex: 1 1 auto; justify-content: center; white-space: nowrap; }
+}
+@media (max-width: 640px) { .dialog .row.end:last-child { bottom: -18px; margin-bottom: -18px; padding-bottom: 18px; } }
+@media (max-width: 640px) {
+  .dialog .row.end:last-child { flex-wrap: nowrap; gap: 8px; }
+  .dialog .row.end:last-child > .btn { min-width: 0; white-space: normal; padding-left: 10px; padding-right: 10px; min-height: 44px; }
+}
+/* Lista de eventos no celular: "Detalhar" e "📅 Lembrete" curtos, lado a lado */
+.cal-short { display: none; }
+@media (max-width: 640px) {
+  .ev-foot .lg-only { display: none; }
+  .ev-foot .cal-short { display: inline; }
+}
+.ev-foot .sm-only { display: none; }
+@media (max-width: 640px) { .ev-foot .sm-only { display: inline; } }

@@ -2230,15 +2230,17 @@
   function rsvpButtonsRaw(ev) {
     const mine = myRsvp(ev);
     if (!canChangeRsvp(ev)) {
-      const why = !rsvpOpen(ev) ? 'Respostas encerradas' : '🔒 Times travados';
+      // "Respostas encerradas" já aparece no aviso do prazo: não repete aqui
+      const why = !rsvpOpen(ev) ? (rsvpDeadline(ev) ? '' : 'Respostas encerradas') : '🔒 Times travados';
+      const sep = why ? ' · ' : '';
       if (mine?.going) {
         return mine.withdraw_requested_at
           ? `<div class="rsvp-locked"><span class="c-gold small">⏳ Pedido de saída enviado</span>
               <button class="btn small ghost" data-cancel-wd="${ev.id}">Cancelar pedido</button></div>`
-          : `<div class="rsvp-locked"><span class="c-yes small">✔ Você vai · ${why}</span>
+          : `<div class="rsvp-locked"><span class="c-yes small">✔ Você vai${sep}${why}</span>
               <button class="btn small ghost danger" data-withdraw="${ev.id}">Não vou poder ir…</button></div>`;
       }
-      return `<div class="rsvp-locked"><span class="muted small">${mine ? '✖ Não vou' : 'Sem resposta'} · ${why}</span></div>`;
+      return `<div class="rsvp-locked"><span class="muted small">${mine ? '✖ Não vou' : 'Sem resposta'}${sep}${why}</span></div>`;
     }
     const a = mine?.going;
     return `<div class="actions">
@@ -2274,7 +2276,7 @@
         ${ev.description ? `<div class="desc">${esc(ev.description)}</div>` : ''}
         ${isOfficer() ? `<div class="counts"><span class="c-yes">✔ ${c.yes} vão</span><span class="c-no">✖ ${c.no} não vão</span><span class="muted">${c.pending} sem resposta</span></div>
         <div class="bar"><span class="y" style="width:${pct(c.yes)}%"></span><span class="n" style="width:${pct(c.no)}%"></span></div>` : ''}
-        <div class="ev-foot"><a class="btn small ghost" href="#/evento/${ev.id}">🔎 Detalhar evento</a>${calBtn(ev)}${can('results') && hasStarted(ev) ? `<button class="btn small ${ev.result ? 'ghost' : 'primary'}" type="button" data-result="${ev.id}">${ev.result ? '✏️ Editar resultado' : '🏆 Registrar resultado'}</button>` : ''}</div>
+        <div class="ev-foot"><a class="btn small ghost" href="#/evento/${ev.id}">🔎 <span class="lg-only">Detalhar evento</span><span class="sm-only">Detalhes</span></a>${calBtn(ev)}${can('results') && hasStarted(ev) ? `<button class="btn small ${ev.result ? 'ghost' : 'primary'}" type="button" data-result="${ev.id}">${ev.result ? '✏️ Editar resultado' : '🏆 Registrar resultado'}</button>` : ''}</div>
       </div>
       ${isOpen(ev) ? rsvpButtons(ev) : ''}
     </div>`;
@@ -2295,7 +2297,7 @@
         <h2>${already ? 'Sua presença está confirmada' : 'Confirmar presença'}</h2>
         <p class="muted" style="margin:0">${esc(ev.title)} · ${esc(fmtDay(ev.starts_at))} às ${fmtTime(ev.starts_at)}</p>
         ${piloting ? `<p class="piloting-note">🧑‍✈️ Respondendo pela conta <b>${esc(displayName(acct))}</b></p>` : ''}
-        <p class="small" style="margin:0">Confira a classe e os atributos ${piloting ? 'desta conta' : 'sua'} para este evento. Se algo mudou, corrija aqui (o perfil da conta também será atualizado).</p>
+        <p style="margin:0">Confira ${piloting ? 'a classe e os atributos desta conta' : 'sua classe e seus atributos'} para este evento. Se algo mudou, corrija aqui (o perfil da conta também será atualizado).</p>
         ${buildFields(initial, true)}
         <fieldset class="discord-q">
           <legend>Vai usar o Discord neste evento?</legend>
@@ -2371,7 +2373,7 @@
   // Aparece nos eventos futuros em que a conta escolhida respondeu "Vou"
   const CAL_MINUTES = 15;
   const calBtn = (ev) => (isOpen(ev) && !hasStarted(ev) && myRsvp(ev)?.going
-    ? ` <button class="btn small ghost" type="button" data-cal="${ev.id}" title="Colocar este evento na sua agenda">📅 Adicionar à Agenda</button>` : '');
+    ? ` <button class="btn small ghost" type="button" data-cal="${ev.id}" title="Colocar este evento na sua agenda" aria-label="Adicionar à Agenda">📅<span class="cal-label"> Adicionar à Agenda</span><span class="cal-short"> Lembrete</span></button>` : '');
   function calInfo(ev) {
     const start = new Date(ev.starts_at);
     const end = new Date(start.getTime() + CAL_MINUTES * 60000);
@@ -2790,7 +2792,7 @@
     main.innerHTML = `
       <p><a href="${finished ? '#/passados' : '#/'}" class="small">← Voltar${finished ? ' aos eventos passados' : ''}</a></p>
       <div class="card stack">
-        <div class="row">
+        <div class="row ev-head">
           <div class="spacer">
             <h1>${esc(ev.title)}</h1>
             <div class="muted">${esc(fmtDay(ev.starts_at))} · ${fmtTime(ev.starts_at)}${typeName(ev.type_id) ? ` · <span class="type-tag">${esc(typeName(ev.type_id))}</span>` : ''}</div>
