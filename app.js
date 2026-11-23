@@ -6625,18 +6625,16 @@
         }).join('')}
       </tbody></table></div>`;
 
-    // ----- Ressonância por faixa: o formato de cada clã -----
-    const bandRows = rowsAll.map((r) => {
-      const v = r.players.map((x) => Number(x.resonance)).filter((n) => n > 0);
-      const segs = RIV_BANDS.map(([lo, hi, label], i) => {
-        const n = v.filter((x) => x >= lo && x < hi).length;
-        const p = v.length ? (100 * n) / v.length : 0;
-        return p ? `<span class="bd-seg bd-${i}" style="width:${p}%" title="${esc(label)}: ${n} jogador${n === 1 ? '' : 'es'} (${Math.round(p)}%)">${p >= 9 ? `${Math.round(p)}%` : ''}</span>` : '';
-      }).join('');
-      return `<div class="bd-row${r.us ? ' bd-us' : ''}"><span class="bd-name">${r.us ? '🔥 INFERNUM' : esc(r.name)}</span>
-        <span class="bd-strip">${v.length ? segs : '<span class="bd-empty">sem ressonância</span>'}</span><span class="bd-total">${v.length}</span></div>`;
-    }).join('');
-    const bandLegend = `<div class="bd-legend">${RIV_BANDS.map(([, , label], i) => `<span><i class="bd-${i}"></i>${esc(label)}</span>`).join('')}</div>`;
+    // ----- Ressonância por faixa: quantos jogadores de cada clã em cada faixa -----
+    const bandTable = `<div class="table-scroll fr-scroll"><table class="bd-table">
+      <thead><tr><th scope="col" class="bd-clan">Clã</th>${RIV_BANDS.map(([, , label], i) => `<th scope="col"><i class="bd-sw bd-${i}" aria-hidden="true"></i>${esc(label)}</th>`).join('')}<th scope="col" class="bd-tot">Total</th></tr></thead>
+      <tbody>${rowsAll.map((r) => {
+        const v = r.players.map((x) => Number(x.resonance)).filter((n) => n > 0);
+        return `<tr class="${r.us ? 'bd-us' : ''}"><th scope="row" class="bd-clan">${r.us ? '🔥 INFERNUM' : esc(r.name)}</th>${RIV_BANDS.map(([lo, hi, label]) => {
+          const n = v.filter((x) => x >= lo && x < hi).length;
+          return `<td class="${n ? '' : 'bd-zero'}" title="${esc(`${label}: ${n} jogador${n === 1 ? '' : 'es'}${v.length ? ` (${Math.round((100 * n) / v.length)}% do clã)` : ''}`)}">${n}</td>`;
+        }).join('')}<td class="bd-tot">${v.length}</td></tr>`;
+      }).join('')}</tbody></table></div>`;
 
     // ----- Dossiê do clã -----
     const sel = clans.find((c) => c.key === RIV.clan) || clans[0];
@@ -6716,9 +6714,8 @@
       </section>
       <section class="rv-sec">
         <div class="rv-sec-head"><h3>Ressonância por faixa</h3></div>
-        <p class="rv-lede">Quanto do clã está em cada faixa. O número à direita é de jogadores com ressonância lida.</p>
-        <div class="bd">${bandRows}</div>
-        ${bandLegend}
+        <p class="rv-lede">Quantos jogadores de cada clã estão em cada faixa. O total conta só quem tem a ressonância lida.</p>
+        ${bandTable}
       </section>
       <section class="rv-sec" id="rv-dossier">
         <div class="rv-sec-head"><h3>Dossiê do clã</h3></div>
