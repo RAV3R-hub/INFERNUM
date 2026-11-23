@@ -6706,7 +6706,7 @@
       <section class="rv-sec rv-front">
         <div class="rv-sec-head">
           <h3>Linha de frente</h3>
-          <div class="seg" role="group" aria-label="Como comparar">${Object.entries(RIV_STATS).map(([k, l]) => `<button type="button" data-rv-stat="${k}" aria-pressed="${k === statK}">${l}</button>`).join('')}</div>
+          <div class="rv-seg" role="group" aria-label="Como comparar">${Object.entries(RIV_STATS).map(([k, l]) => `<button type="button" data-rv-stat="${k}" aria-pressed="${k === statK}">${l}</button>`).join('')}</div>
         </div>
         <p class="rv-lede">Cada rival contra o INFERNUM, pela última leitura. <span class="fr-key fr-key-us">INFERNUM melhor</span> <span class="fr-key fr-key-them">rival melhor</span></p>
         ${frontTable}
