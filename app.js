@@ -6171,10 +6171,24 @@
     const pts = [];
     for (let k = 0; k <= 10; k++) { const t = per.from + (span * k) / 10; const v = activeAt(t); pts.push({ t, label: fmtShortDate(new Date(t).toISOString()), v, tip: `${dmy(t)}: ${v} membros ativos` }); }
     const healthChart = mlog.length ? lineChart(pts, { time: true, aria: 'Membros ativos ao longo do período' }) : empty('Sem histórico de entradas e saídas.');
-    const moveList = (rows, kind) => (rows.length ? `<ul class="plain-list">${rows.slice().sort((a, b) => Date.parse(b.changed_at) - Date.parse(a.changed_at)).map((l) => {
-      const m = memberById(l.user_id);
-      return `<li>${fmtShortDate(l.changed_at)} · ${link(m)}${kind === 'out' && l.reason ? ` <span class="muted small">· ${esc(l.reason)}</span>` : kind === 'in' && l.from_role === 'former' ? ' <span class="muted small">· readmitido</span>' : ''}</li>`;
-    }).join('')}</ul>` : empty(kind === 'in' ? 'Ninguém entrou no período.' : 'Ninguém saiu no período.'));
+    // Mais de 10: mostra só os 10 de maior Ressonância e oferece copiar a lista completa
+    const MOVE_MAX = 10;
+    const moveRes = (l) => { const v = Number(memberById(l.user_id)?.resonance); return Number.isFinite(v) && v > 0 ? v : null; };
+    const moveByDate = (rows) => rows.slice().sort((a, b) => Date.parse(b.changed_at) - Date.parse(a.changed_at));
+    const moveList = (rows, kind) => {
+      if (!rows.length) return empty(kind === 'in' ? 'Ninguém entrou no período.' : 'Ninguém saiu no período.');
+      const many = rows.length > MOVE_MAX;
+      const shown = many ? rows.slice().sort((a, b) => (moveRes(b) ?? -1) - (moveRes(a) ?? -1)).slice(0, MOVE_MAX) : moveByDate(rows);
+      const items = shown.map((l) => {
+        const m = memberById(l.user_id); const r = moveRes(l);
+        return `<li>${fmtShortDate(l.changed_at)} · ${link(m)} <span class="muted small">· ${r == null ? 'sem Ressonância' : `RSN ${intFmt(r)}`}</span>${kind === 'out' && l.reason ? ` <span class="muted small">· ${esc(l.reason)}</span>` : kind === 'in' && l.from_role === 'former' ? ' <span class="muted small">· readmitido</span>' : ''}</li>`;
+      }).join('');
+      return `${many ? `<div class="muted small">Os ${MOVE_MAX} de maior Ressonância, de ${rows.length}.</div>` : ''}<ul class="plain-list">${items}</ul>
+        ${many ? `<button class="btn small" id="pn-copy-${kind}">📋 Copiar lista completa</button>` : ''}`;
+    };
+    const moveCopy = (rows, kind) => [`**${kind === 'in' ? 'Entraram no clã' : 'Saíram do clã'}: ${per.label} (${rows.length})**`,
+      ...moveByDate(rows).map((l) => { const m = memberById(l.user_id); const r = moveRes(l);
+        return `• ${m ? displayName(m) : '—'} (${fmtShortDate(l.changed_at)}${r == null ? '' : `, RSN ${intFmt(r)}`}${kind === 'out' && l.reason ? `, ${l.reason}` : ''})`; })].join('\n');
 
     // ----- Atendimento -----
     const openTk = (state.tickets || []).filter((t) => t.status !== 'resolved');
@@ -6310,6 +6324,8 @@
     $('#pn-cycles')?.addEventListener('click', () => openCyclesDialog(cycles, () => viewPanel()));
     $('#pn-copy-inactive')?.addEventListener('click', () => copy([`**Inativos: faltaram os últimos ${N} eventos**`, ...inactive.map((r) => `• ${displayName(r.m)}`)].join('\n'), 'Lista copiada'));
     $('#pn-copy-incomplete')?.addEventListener('click', () => copy(['**Perfis para atualizar no site**', ...incomplete.map((r) => `• ${displayName(r.m)} (${r.miss.join(', ')})`)].join('\n'), 'Lista copiada'));
+    $('#pn-copy-in')?.addEventListener('click', () => copy(moveCopy(M.joins, 'in'), 'Lista copiada'));
+    $('#pn-copy-out')?.addEventListener('click', () => copy(moveCopy(M.exits, 'out'), 'Lista copiada'));
     $('#pn-type').addEventListener('change', (e) => { PANEL.type = e.target.value; viewPanel().catch(fail); });
     main.querySelectorAll('[data-pn-attr]').forEach((b) => b.addEventListener('click', () => {
       if (PANEL.attr === b.dataset.pnAttr) return;
